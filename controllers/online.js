@@ -1,5 +1,5 @@
 // controllers/onlineOrderController.js
-import Order from '../models/Order.js';
+import Order from '../models/order.js';
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
 import Notification from '../models/notification.js';
