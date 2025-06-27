@@ -1,0 +1,34 @@
+# Node.js
+node_modules/
+.env
+.env.local
+.env.production
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+logs/**/*.log
+
+# Optional: Ignore build or dist if you're using a bundler
+dist/
+build/
+
+# Optional: Ignore uploads if storing images locally
+uploads/
+public/uploads/
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Git
+.git/
