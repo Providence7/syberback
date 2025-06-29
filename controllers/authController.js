@@ -121,11 +121,11 @@ export async function login(req, res) {
   await user.save();
 
   // ✅ Set both tokens in secure cookies
-  const cookieOptions = {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-  };
+const cookieOptions = {
+  httpOnly: true,
+  secure: true,              // ✅ Must be true in production for HTTPS
+  sameSite: 'None',          // ✅ Allows cross-origin cookies
+};
 
   res
     .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 }) // 15 minutes
@@ -168,13 +168,11 @@ export async function refresh(req, res) {
 
   user.refreshToken = newRefreshToken;
   await user.save();
-
 const cookieOptions = {
   httpOnly: true,
-  secure: false, // or `true` in production
-  sameSite: 'lax', // or 'strict' (explained below)
+  secure: true,              // ✅ Must be true in production for HTTPS
+  sameSite: 'None',          // ✅ Allows cross-origin cookies
 };
-
 
   res
     .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
