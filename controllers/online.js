@@ -1,153 +1,251 @@
 // controllers/onlineOrderController.js
-import Order from '../models/order.js';
+import OnlineOrder from '../models/order.js';
 import Measurement from '../models/measurement.js';
-import User from '../models/user.js';
-import Notification from '../models/notification.js';
-import nodemailer from 'nodemailer';
+import  uploader  from '../middlewares/uploadMiddleware.js';
+import { sendEmail } from '../utils/email.js';
+import { generateReceiptPDF } from '../utils/pdfGenerator.js';
+import fs from 'fs';
+import path from 'path';
 
-export const createOrder = async (req, res) => {
+// Create Order
+export async function createOrder(req, res) {
   try {
+    const userId = req.user.id;
+    const userInfo = req.user; // assume user object contains email, name, phone, address, etc.
+
     const {
       styleSource,
       styleTitle,
       stylePrice,
       materialSource,
       materialTitle,
+      materialColor,
       materialPrice,
+      tailorSupplyMaterial,
+      yardsNeeded,
+      pricePerYard,
       measurement,
-      note,
+      note
     } = req.body;
 
-    const userId = req.user?.id || req.user?._id;
-
-    // Handle uploaded images
-    const styleFile = req.files?.styleImage?.[0];
-    const materialFile = req.files?.materialImage?.[0];
-
-    const styleImage = styleFile?.path || null;
-    const styleImageId = styleFile?.filename || null;
-
-    const materialImage = materialFile?.path || null;
-    const materialImageId = materialFile?.filename || null;
-
-    // Check measurement exists
-    const foundMeasurement = await Measurement.findById(measurement);
-    if (!foundMeasurement) {
-      return res.status(400).json({ error: 'Invalid measurement ID' });
+    if (!styleTitle || !measurement) {
+      return res.status(400).json({ error: 'Style title and measurement are required' });
     }
 
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const measurementExists = await Measurement.findById(measurement);
+    if (!measurementExists) {
+      return res.status(400).json({ error: 'Invalid measurement selected' });
+    }
 
-    const isUnderReview = styleSource === 'upload';
-    const status = isUnderReview ? 'under_review' : 'submitted';
+    // Upload images to Cloudinary
+    let styleImagePath = req.body.styleImage;
+    let materialImagePath = req.body.materialImage;
 
-    // Create order
-    const newOrder = await Order.create({
+    if (req.files) {
+      if (req.files.styleImage) {
+        const result = await uploader(req.files.styleImage[0].path, 'online_orders');
+        styleImagePath = result.secure_url;
+        fs.unlinkSync(req.files.styleImage[0].path);
+      }
+      if (req.files.materialImage) {
+        const result = await uploader(req.files.materialImage[0].path, 'online_orders');
+        materialImagePath = result.secure_url;
+        fs.unlinkSync(req.files.materialImage[0].path);
+      }
+    }
+
+    const orderData = {
       user: userId,
       styleSource,
+      styleImage: styleImagePath,
       styleTitle,
-      styleImage,
-      styleImageId,
-      stylePrice,
+      stylePrice: parseFloat(stylePrice) || 0,
       materialSource,
+      materialImage: materialImagePath,
       materialTitle,
-      materialImage,
-      materialImageId,
-      materialPrice,
+      materialColor,
+      materialPrice: parseFloat(materialPrice) || 0,
+      tailorSupplyMaterial: tailorSupplyMaterial === 'true',
+      yardsNeeded: parseFloat(yardsNeeded) || 0,
+      pricePerYard: parseFloat(pricePerYard) || 0,
       measurement,
-      note,
-      isUnderReview,
-      status,
+      note: note || ''
+    };
+
+    const order = new OnlineOrder(orderData);
+    order.calculateDeliveryEstimate();
+    await order.save();
+    await order.populate('measurement', 'name');
+    await order.populate('user', 'name email');
+
+    // Generate PDF
+    const pdfPath = await generateReceiptPDF(order, userInfo);
+
+    // Send Emails
+    await sendEmail({
+      to: userInfo.email,
+      subject: 'Your Order Receipt',
+      html: `<p>Hello ${userInfo.name}, your order has been received!</p>`,
+      attachments: [{
+        filename: 'receipt.pdf',
+        path: pdfPath
+      }]
     });
 
-    const populatedOrder = await Order.findById(newOrder._id).populate({
-      path: 'measurement',
-      select: 'name',
+    await sendEmail({
+      to: 'sybertailor@gmail.com',
+      subject: 'New Order Received',
+      html: `<p>User <b>${userInfo.name}</b> placed an order.</p>
+             <p>Email: ${userInfo.email}</p>
+             <p>Phone: ${userInfo.phone || 'N/A'}</p>
+             <p>Address: ${userInfo.address || 'N/A'}</p>
+             <p>Order ID: ${order._id}</p>`
     });
 
-    // Create notification
-    await Notification.create({
-      user: userId,
-      title: 'New Order Placed',
-      message: `Your order for ${styleTitle} has been successfully submitted.`,
+    fs.unlinkSync(pdfPath);
+
+    res.status(201).json({
+      message: 'Order created successfully',
+      order,
+      estimatedDelivery: order.estimatedDelivery
     });
 
-    // Send email
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
-
-    const emailSubject = isUnderReview
-      ? 'SyberTailor Order Under Review'
-      : 'SyberTailor Order Confirmation';
-
-    const emailBody = `
-      <p>Hi ${user.fullName || 'Client'},</p>
-      <p>Your order for <strong>${styleTitle}</strong> ${
-        isUnderReview
-          ? 'is currently under review because you uploaded a custom style.'
-          : 'has been successfully submitted.'
-      }</p>
-      <p><strong>Note:</strong> ${note || 'None'}</p>
-      <p>We will get back to you shortly.</p>
-    `;
-
-    await transporter.sendMail({
-      from: `SyberTailor <${process.env.SMTP_USER}>`,
-      to: [user.email, 'sybertailor@gmail.com'].filter(Boolean),
-      subject: emailSubject,
-      html: emailBody,
-    });
-
-    res.status(201).json(populatedOrder);
-  } catch (err) {
-    console.error('❌ Order creation error:', err);
-    res.status(500).json({ error: 'Failed to create online order' });
+  } catch (error) {
+    console.error('Order creation error:', error);
+    res.status(500).json({ error: 'Failed to create order', details: error.message });
   }
-};
+}
 
-
-
-
-export const getUserOrders = async (req, res) => {
+// Get all orders for a user
+export async function getUserOrders(req, res) {
   try {
-    const userId = req.user?.id || req.user?._id;
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    const userId = req.user.id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const orders = await OnlineOrder.find({ user: userId })
+      .populate('measurement', 'name')
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalOrders = await OnlineOrder.countDocuments({ user: userId });
+
+    res.json({
+      orders,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalOrders / limit),
+        totalOrders
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
+  }
+}
+
+// Get single order
+export async function getOrder(req, res) {
+  try {
+    const { orderId } = req.params;
+    const userId = req.user.id;
+
+    const order = await OnlineOrder.findOne({ _id: orderId, user: userId })
+      .populate('measurement', 'name details')
+      .populate('user', 'name email');
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
     }
 
-    console.log('🔍 Fetching orders for user:', userId);
+    res.json(order);
 
-    const orders = await Order.find({ user: userId })
-      .populate({ path: 'measurement', select: 'name' })
-      .sort({ createdAt: -1 });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch order', details: error.message });
+  }
+}
 
-    console.log(`✅ Orders found: ${orders.length}`);
+// Delete order (only if pending)
+export async function deleteOrder(req, res) {
+  try {
+    const { orderId } = req.params;
+    const userId = req.user.id;
 
-    // Add expected delivery date (5 days after createdAt)
-    const enrichedOrders = orders.map((order) => {
-      const orderObj = order.toObject();
-      const createdDate = new Date(order.createdAt);
+    const order = await OnlineOrder.findOne({ _id: orderId, user: userId });
+    if (!order) return res.status(404).json({ error: 'Order not found' });
 
-      // Ensure time zone safety and proper addition
-      const deliveryDate = new Date(createdDate.getTime() + 5 * 24 * 60 * 60 * 1000);
+    if (order.status !== 'pending') {
+      return res.status(400).json({ error: 'Only pending orders can be deleted' });
+    }
 
-      return {
-        ...orderObj,
-        expected: deliveryDate.toISOString().split('T')[0], // Format: YYYY-MM-DD
-      };
+    await OnlineOrder.findByIdAndDelete(orderId);
+
+    res.json({ message: 'Order deleted successfully' });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete order', details: error.message });
+  }
+}
+
+// Admin: Get all orders
+export async function getAllOrders(req, res) {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const status = req.query.status;
+
+    const query = status ? { status } : {};
+
+    const orders = await OnlineOrder.find(query)
+      .populate('measurement', 'name')
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalOrders = await OnlineOrder.countDocuments(query);
+
+    res.json({
+      orders,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalOrders / limit),
+        totalOrders
+      }
     });
 
-    res.status(200).json(enrichedOrders);
-  } catch (err) {
-    console.error('❌ Error fetching user orders:', err);
-    res.status(500).json({ error: 'Failed to fetch orders' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
   }
-};
+}
+
+// Admin: Update order status
+export async function updateOrderStatus(req, res) {
+  try {
+    const { orderId } = req.params;
+    const { status, note } = req.body;
+    const validStatuses = ['pending', 'under_review', 'confirmed', 'in_progress', 'completed', 'cancelled'];
+
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const order = await OnlineOrder.findById(orderId);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    order.status = status;
+    if (note) order.note = note;
+    if (status === 'completed') order.actualDelivery = new Date();
+
+    await order.save();
+
+    res.json({ message: 'Order status updated', order });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update order status', details: error.message });
+  }
+}

@@ -11,12 +11,20 @@ export const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASS,
   },
 });
-console.log('SMTP_HOST:', process.env.SMTP_HOST);
+
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('SMTP connection error:', error);
+  } else {
+    console.log('SMTP ready:', success);
+  }
+});
 
 export function sendEmail({ to, subject, html }) {
   return transporter.sendMail({
-    from: process.env.SMTP_USER,
-    to, subject, html,
+    from: `"SyberTailor" <${process.env.SMTP_USER}>`,
+    to,
+    subject,
+    html,
   });
-  
 }
