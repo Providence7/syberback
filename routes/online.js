@@ -23,10 +23,10 @@ const uploadFields = uploader.fields([
 router.use(authenticateUser);
 
 // Create a new online order
-router.post('/',authenticateUser, uploadFields, createOrder);
+router.post('/', uploadFields, createOrder);
 
 // Get all orders for the authenticated user
-router.get('/my-orders',authenticateUser,  getUserOrders);
+router.get('/my-orders',  getUserOrders);
 
 // Get a specific order by ID for the authenticated user
 router.get('/:orderId', getOrder);
