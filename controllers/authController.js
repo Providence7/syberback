@@ -128,7 +128,7 @@ const cookieOptions = {
 };
 
   res
-    .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 }) // 15 minutes
+    .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 55 * 60 * 1000 }) // 15 minutes
     .cookie('refreshToken', refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 }) // 7 days
     .json({ user: { uniqueId: user.uniqueId, email: user.email } }); // optional, token now in cookies
 }

@@ -7,7 +7,9 @@ import connectDB from  "./config/db.js"
 import measurementRoutes from './routes/measurement.js';
 import inpersonRoute  from  './routes/inpersonRoutes.js'
 import notificationRoutes from './routes/notify.js';
-import orderRoute from './routes/online.js'
+import orderRoute from './routes/online.js';
+import styleRoutes from './routes/styleRoutes.js';
+import currencyRoutes from './routes/currency.js';
 import { randomUUID } from 'crypto';
 const uuid = randomUUID();
 dotenv.config();
@@ -15,7 +17,7 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: 'https://syber.onrender.com', // your frontend origin
+  origin: 'http://localhost:5173', // your frontend origin
   credentials: true,
 }));
 
@@ -27,6 +29,8 @@ app.use('/api/measurements', measurementRoutes);
 app.use('/api/order', inpersonRoute)
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/online', orderRoute)
+app.use('/api/styles', styleRoutes);
+app.use('/api/currency', currencyRoutes);
 
 connectDB()
 

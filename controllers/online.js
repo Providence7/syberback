@@ -7,11 +7,10 @@ import { generateReceiptPDF } from '../utils/pdfGenerator.js';
 import fs from 'fs';
 import path from 'path';
 
-// Create Order
 export async function createOrder(req, res) {
   try {
     const userId = req.user.id;
-    const userInfo = req.user; // assume user object contains email, name, phone, address, etc.
+    const userInfo = req.user;
 
     const {
       styleSource,
@@ -37,9 +36,9 @@ export async function createOrder(req, res) {
       return res.status(400).json({ error: 'Invalid measurement selected' });
     }
 
-    // Upload images to Cloudinary
-    let styleImagePath = req.body.styleImage;
-    let materialImagePath = req.body.materialImage;
+    // Upload images to Cloudinary if present
+    let styleImagePath = req.body.styleImage || null;
+    let materialImagePath = req.body.materialImage || null;
 
     if (req.files) {
       if (req.files.styleImage) {
@@ -53,6 +52,11 @@ export async function createOrder(req, res) {
         fs.unlinkSync(req.files.materialImage[0].path);
       }
     }
+
+    const isUploadedStyle = styleSource === 'uploaded';
+
+    // Set status: 'under_review' if uploaded, otherwise 'pending'
+    const orderStatus = isUploadedStyle ? 'under_review' : 'pending';
 
     const orderData = {
       user: userId,
@@ -69,7 +73,8 @@ export async function createOrder(req, res) {
       yardsNeeded: parseFloat(yardsNeeded) || 0,
       pricePerYard: parseFloat(pricePerYard) || 0,
       measurement,
-      note: note || ''
+      note: note || '',
+      status: orderStatus,
     };
 
     const order = new OnlineOrder(orderData);
@@ -78,10 +83,10 @@ export async function createOrder(req, res) {
     await order.populate('measurement', 'name');
     await order.populate('user', 'name email');
 
-    // Generate PDF
+    // Generate PDF receipt
     const pdfPath = await generateReceiptPDF(order, userInfo);
 
-    // Send Emails
+    // Send email to user with receipt
     await sendEmail({
       to: userInfo.email,
       subject: 'Your Order Receipt',
@@ -92,6 +97,7 @@ export async function createOrder(req, res) {
       }]
     });
 
+    // Send email to admin notifying new order
     await sendEmail({
       to: 'sybertailor@gmail.com',
       subject: 'New Order Received',
@@ -101,6 +107,36 @@ export async function createOrder(req, res) {
              <p>Address: ${userInfo.address || 'N/A'}</p>
              <p>Order ID: ${order._id}</p>`
     });
+
+    // If style is uploaded, send additional review emails with style image attached
+    if (isUploadedStyle) {
+      // Email to client about review
+      await sendEmail({
+        to: userInfo.email,
+        subject: 'Style Uploaded - Awaiting Review',
+        html: `<p>Hi ${userInfo.name}, your uploaded style has been received and is awaiting review by our team. We will contact you shortly.</p>`,
+        attachments: styleImagePath ? [{
+          filename: 'uploaded-style.jpg',
+          path: styleImagePath
+        }] : []
+      });
+
+      // Email to admin about new uploaded style for review
+      await sendEmail({
+        to: 'sybertailor@gmail.com',
+        subject: 'New Style Uploaded for Review',
+        html: `
+          <p>User <b>${userInfo.name}</b> uploaded a new style for review.</p>
+          <p>Email: ${userInfo.email}</p>
+          <p>Phone: ${userInfo.phone || 'N/A'}</p>
+          <p>Order ID: ${order._id}</p>
+        `,
+        attachments: styleImagePath ? [{
+          filename: 'uploaded-style.jpg',
+          path: styleImagePath
+        }] : []
+      });
+    }
 
     fs.unlinkSync(pdfPath);
 
