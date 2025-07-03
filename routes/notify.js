@@ -9,13 +9,13 @@ import {
 const router = express.Router();
 
 // ✅ First, authenticate the user for all routes
-router.use(authenticateUser);
+// router.use(authenticateUser);
 
 // ✅ Then log after authentication
 
 // ✅ Routes
-router.get('/', getNotifications);
-router.post('/', markAllAsRead);
-router.post('/:id/read', markNotificationAsRead);
+router.get('/',authenticateUser, getNotifications);
+router.post('/',authenticateUser, markAllAsRead);
+router.post('/:id/read',authenticateUser, markNotificationAsRead);
 
 export default router;

@@ -123,8 +123,9 @@ export async function login(req, res) {
   // ✅ Set both tokens in secure cookies
 const cookieOptions = {
   httpOnly: true,
-  secure: true,              // ✅ Must be true in production for HTTPS
-  sameSite: 'None',          // ✅ Allows cross-origin cookies
+    secure: false,
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000          // ✅ Allows cross-origin cookies
 };
 
   res
