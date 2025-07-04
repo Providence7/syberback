@@ -177,9 +177,10 @@ export async function refresh(req, res) {
   user.refreshToken = newRefreshToken;
   await user.save();
 const cookieOptions = {
-  httpOnly: true,
-  secure: true,              // ✅ Must be true in production for HTTPS
-  sameSite: 'None',          // ✅ Allows cross-origin cookies
+     httpOnly: true,
+    secure: isProd,                    // 🔐 Only over HTTPS in production
+    sameSite: isProd ? 'None' : 'Lax', // ✅ Allows cross-origin cookies in prod
+    path: '/',     // ✅ Allows cross-origin cookies
 };
 
   res
