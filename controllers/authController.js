@@ -120,18 +120,25 @@ export async function login(req, res) {
   user.refreshToken = refreshToken;
   await user.save();
 
-  // ✅ Set both tokens in secure cookies
-const cookieOptions = {
-  httpOnly: true,
-    secure: false,
-    sameSite: 'lax',
-    maxAge: 24 * 60 * 60 * 1000          // ✅ Allows cross-origin cookies
-};
+  // ✅ Production-safe cookie options
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProd,                    // 🔐 Only over HTTPS in production
+    sameSite: isProd ? 'None' : 'Lax', // ✅ Allows cross-origin cookies in prod
+    path: '/',
+  };
 
   res
-    .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 1 * 24 * 60 * 60 * 1000  }) // 15 minutes
-    .cookie('refreshToken', refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 }) // 7 days
-    .json({ user: { uniqueId: user.uniqueId, email: user.email } }); // optional, token now in cookies
+    .cookie('accessToken', accessToken, {
+      ...cookieOptions,
+      maxAge: 15 * 60 * 1000, // 15 minutes
+    })
+    .cookie('refreshToken', refreshToken, {
+      ...cookieOptions,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    })
+    .json({ user: { uniqueId: user.uniqueId, email: user.email } });
 }
 
 

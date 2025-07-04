@@ -16,7 +16,7 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: "https://syber.onrender.com", // your frontend origin
+  origin: process.env.CLIENT_URL, // your frontend origin
   credentials: true,
 }));
 
