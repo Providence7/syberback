@@ -176,12 +176,15 @@ export async function refresh(req, res) {
 
   user.refreshToken = newRefreshToken;
   await user.save();
-const cookieOptions = {
-     httpOnly: true,
+
+  // ✅ Define isProd in this function scope
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieOptions = {
+    httpOnly: true,
     secure: isProd,                    // 🔐 Only over HTTPS in production
     sameSite: isProd ? 'None' : 'Lax', // ✅ Allows cross-origin cookies in prod
-    path: '/',     // ✅ Allows cross-origin cookies
-};
+    path: '/',
+  };
 
   res
     .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
@@ -258,6 +261,7 @@ export async function resetPassword(req, res) {
 
   res.json({ message: 'Password reset successful' });
 }
+
 // Get user profile
 export const getProfile = async (req, res) => {
   try {
