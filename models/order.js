@@ -1,49 +1,60 @@
-// now create the contoller , rememeber im using cloudinary , add in app notification and email to both client and admin
-// models/Order.js
 import mongoose from 'mongoose';
 
-const OrderSchema = new mongoose.Schema({
-  userId: {
+const styleSchema = new mongoose.Schema({
+  title: String,
+  price: Number,
+  yardsRequired: Number,
+  recommendedMaterials: [String],
+  image: {
+    type: String, // Cloudinary URL
+    required: true,
+  },
+}, { _id: false });
+
+const materialSchema = new mongoose.Schema({
+  name: String,
+  type: String,
+  pricePerYard: Number,
+  image: {
+    type: String, // Cloudinary URL
+    required: true,
+  },
+}, { _id: false });
+
+const orderSchema = new mongoose.Schema({
+  user: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User', // Optional: assuming you have user auth
+    ref: 'User', // Reference to User model
     required: true,
   },
   style: {
-    id: { type: String, required: true },
-    title: { type: String, required: true },
-    image: { type: String, required: true }, // Cloudinary image URL
-    price: { type: Number, required: true },
-    yardsRequired: { type: Number, required: true },
-    recommendedMaterials: [{ type: String }],
+    type: styleSchema,
+    required: true,
   },
   material: {
-    id: { type: String, required: true },
-    name: { type: String, required: true },
-    image: { type: String, required: true }, // Cloudinary image URL
-    type: { type: String },
-    pricePerYard: { type: Number, required: true },
+    type: materialSchema,
+    required: true,
   },
- measurements: {
-  type: [String], // array of selected measurement names
-  default: [],
-},
+  measurements: [
+    {
+      type: String, // Only the measurement name is stored
+      required: true,
+    }
+  ],
   notes: {
     type: String,
     default: '',
   },
-  totalCost: {
-    type: Number,
-    required: true,
-  },
   status: {
     type: String,
-    enum: ['pending', 'confirmed', 'paid', 'cancelled'],
+    enum: ['pending', 'in-progress', 'completed', 'cancelled'],
     default: 'pending',
   },
-  createdAt: {
-    type: Date,
-    default: Date.now,
+  paymentStatus: {
+    type: String,
+    enum: ['unpaid', 'paid'],
+    default: 'unpaid',
   },
-});
+}, { timestamps: true });
 
-export default mongoose.model('Order', OrderSchema);
+export default mongoose.model('Order', orderSchema);
