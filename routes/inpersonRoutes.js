@@ -1,5 +1,5 @@
 import express from 'express';
-import { authenticateUser } from '../middlewares/authMiddleware.js';
+import { protect} from '../middlewares/authMiddleware.js';
 import dotenv from 'dotenv';
 import { 
   createOrder, 
@@ -13,7 +13,7 @@ import {
 dotenv.config();
 const router = express.Router();
 // User routes
-router.use(authenticateUser)
+router.use(protect)
 router.post('/in-person/', createOrder);
 router.get('/in-person/', getUserOrders);
 router.get('/in-person/:orderId', getOrderById);

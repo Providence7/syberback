@@ -1,5 +1,5 @@
 import express from 'express';
-import { authenticateUser } from '../middlewares/authMiddleware.js';
+import { protect } from '../middlewares/authMiddleware.js';
 import {
   getNotifications,
   markAllAsRead,
@@ -9,13 +9,13 @@ import {
 const router = express.Router();
 
 // ✅ First, authenticate the user for all routes
-// router.use(authenticateUser);
+// router.use(protect);
 
 // ✅ Then log after authentication
 
 // ✅ Routes
-router.get('/',authenticateUser, getNotifications);
-router.post('/',authenticateUser, markAllAsRead);
-router.post('/:id/read',authenticateUser, markNotificationAsRead);
+router.get('/',protect, getNotifications);
+router.post('/',protect, markAllAsRead);
+router.post('/:id/read',protect, markNotificationAsRead);
 
 export default router;
