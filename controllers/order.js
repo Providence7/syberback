@@ -26,154 +26,198 @@ const formatOrderForAdminFrontend = (order) => {
 };
 
 export const createOrder = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const {
-      style,
-      material,
-      measurements, // Expecting an array of objects: [{ name: "Chest", value: 40 }, ...]
-      notes,
-      orderType = 'Online' // Default to 'Online' if not provided
-    } = req.body;
-
-    // Validate required fields
-    if (!style || !material || !style.title || !style.price || !material.name || !material.pricePerYard) {
-      return res.status(400).json({ message: 'Style (title, price), material (name, pricePerYard) are required.' });
-    }
-
-    // Clean and validate style data
-    const cleanStyle = {
-      title: style.title,
-      price: parseFloat(style.price) || 0,
-      yardsRequired: parseFloat(style.yardsRequired) || 0,
-      recommendedMaterials: style.recommendedMaterials || [],
-      image: style.image
-    };
-
-    // Clean and validate material data
-    const cleanMaterial = {
-      name: material.name,
-      type: material.type,
-      pricePerYard: parseFloat(material.pricePerYard) || 0,
-      image: material.image
-    };
-
-    // Cloudinary upload for style image
-    let styleImageUrl = cleanStyle.image;
-    if (cleanStyle.image && cleanStyle.image.startsWith('data:image')) {
-      const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, {
-        folder: 'orders/styles',
-      });
-      styleImageUrl = uploadedStyle.secure_url;
-    } else if (!cleanStyle.image) {
-      // If no image is provided and it's not a data URL, handle as an error
-      return res.status(400).json({ message: 'Style image is required.' });
-    }
-
-
-    // Cloudinary upload for material image
-    let materialImageUrl = cleanMaterial.image;
-    if (cleanMaterial.image && cleanMaterial.image.startsWith('data:image')) {
-      const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, {
-        folder: 'orders/materials',
-      });
-      materialImageUrl = uploadedMaterial.secure_url;
-    } else if (!cleanMaterial.image) {
-      // If no image is provided and it's not a data URL, handle as an error
-      return res.status(400).json({ message: 'Material image is required.' });
-    }
-
-    // Get user details to populate customerName and customerEmail in the order
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    // Create the order
-    const newOrder = new Order({
-      user: userId,
-      customerName: user.name, // Populated from User model
-      customerEmail: user.email, // Populated from User model
-      orderType: orderType, // Set from request body, defaults to 'Online'
-      style: {
-        ...cleanStyle,
-        image: styleImageUrl
-      },
-      material: {
-        ...cleanMaterial,
-        image: materialImageUrl
-      },
-      measurements: measurements || [],
-      notes: notes || '',
-      status: 'pending',
-      paymentStatus: 'unpaid',
-      // totalPrice will be calculated by the pre-save hook
-    });
-
-    await newOrder.save(); // totalPrice is calculated here by the hook
-
-    // Create notification for the user
-    await Notification.create({
-      user: userId,
-      title: 'New Order Placed',
-      message: `Your order for ${cleanStyle.title} has been received and is being processed.`,
-    });
-
-    // Send emails
     try {
-      await sendEmail({
-        to: user.email,
-        subject: 'Order Confirmation',
-        html: `
-          <h2>Order Confirmation</h2>
-          <p>Dear ${user.name},</p>
-          <p>Your order has been received successfully!</p>
-          <p><strong>Style:</strong> ${cleanStyle.title}</p>
-          <p><strong>Material:</strong> ${cleanMaterial.name}</p>
-          <p><strong>Estimated Total:</strong> ₦${newOrder.totalPrice.toLocaleString()}</p>
-          <p>We'll get back to you soon with updates.</p>
-        `,
-      });
+        const userId = req.user.id;
+        const {
+            style,
+            material,
+            measurements,
+            notes,
+            orderType = 'Online'
+        } = req.body;
 
-      await sendEmail({
-        to: process.env.ADMIN_EMAIL, // Use an environment variable for admin email
-        subject: 'New Order Received',
-        html: `
-          <h2>New Order Received!</h2>
-          <p><strong>Customer:</strong> ${user.name} (${user.email})</p>
-          <p><strong>Order ID:</strong> ${newOrder._id}</p>
-          <p><strong>Order Type:</strong> ${newOrder.orderType}</p>
-          <p><strong>Style:</strong> ${cleanStyle.title}</p>
-          <p><strong>Material:</strong> ${cleanMaterial.name}</p>
-          <p><strong>Measurements:</strong> ${measurements && measurements.length > 0 ? measurements.map(m => `${m.name}: ${m.value}${m.unit ? m.unit : ''}`).join(', ') : 'None'}</p>
-          <p><strong>Notes:</strong> ${notes || 'None'}</p>
-          <p><strong>Total:</strong> ₦${newOrder.totalPrice.toLocaleString()}</p>
-          <p>Login to the admin panel to manage this order.</p>
-        `,
-      });
-    } catch (emailError) {
-      console.error('Email sending failed:', emailError);
-      // Don't fail the order creation if email fails
+        // 1. Validate basic presence of style and material objects
+        if (!style || !material) {
+            console.error('Controller Error: Missing style or material in request body.');
+            return res.status(400).json({ message: 'Style and material data are required.' });
+        }
+
+        // 2. Explicitly parse numeric fields and provide fallbacks.
+        // This is the most crucial part to ensure no NaNs propagate to the model.
+        const cleanStyle = {
+            title: style.title,
+            // Ensure price is a valid number, default to 0 if not.
+            price: typeof style.price === 'number' ? style.price : (parseFloat(style.price) || 0),
+            // Ensure yardsRequired is a valid number, default to 0 if not.
+            yardsRequired: typeof style.yardsRequired === 'number' ? style.yardsRequired : (parseFloat(style.yardsRequired) || 0),
+            recommendedMaterials: style.recommendedMaterials || [],
+            image: style.image
+        };
+
+        const cleanMaterial = {
+            name: material.name,
+            type: material.type,
+            // Ensure pricePerYard is a valid number, default to 0 if not.
+            pricePerYard: typeof material.pricePerYard === 'number' ? material.pricePerYard : (parseFloat(material.pricePerYard) || 0),
+            image: material.image
+        };
+
+        console.log('Controller: Parsed cleanStyle:', cleanStyle);
+        console.log('Controller: Parsed cleanMaterial:', cleanMaterial);
+
+        // Validate that required parsed numeric fields are not 0 if they're actually critical
+        if (cleanStyle.price === 0 && style.price !== 0 && style.price !== "0") {
+            console.error('Controller Error: Style price became 0 after parsing, but original was not 0 or "0".');
+            return res.status(400).json({ message: 'Style price must be a valid number.' });
+        }
+        if (cleanMaterial.pricePerYard === 0 && material.pricePerYard !== 0 && material.pricePerYard !== "0") {
+            console.error('Controller Error: Material price per yard became 0 after parsing, but original was not 0 or "0".');
+            return res.status(400).json({ message: 'Material price per yard must be a valid number.' });
+        }
+
+        // Validate essential properties for the schema requirements
+        if (!cleanStyle.title || !cleanStyle.image || !cleanMaterial.name || !cleanMaterial.image) {
+            console.error('Controller Error: Missing required style/material properties (title, name, image).');
+            return res.status(400).json({ message: 'Style title, style image, material name, and material image are required.' });
+        }
+
+        // Cloudinary upload for style image
+        let styleImageUrl = cleanStyle.image;
+        if (cleanStyle.image && typeof cleanStyle.image === 'string' && cleanStyle.image.startsWith('data:image')) {
+            try {
+                const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, {
+                    folder: 'orders/styles',
+                });
+                styleImageUrl = uploadedStyle.secure_url;
+            } catch (uploadError) {
+                console.error("Cloudinary style image upload failed:", uploadError);
+                return res.status(500).json({ message: "Failed to upload style image." });
+            }
+        } else if (!cleanStyle.image) {
+            console.error('Controller Error: Style image is missing (after initial check).');
+            return res.status(400).json({ message: 'Style image is required.' });
+        }
+
+        // Cloudinary upload for material image
+        let materialImageUrl = cleanMaterial.image;
+        if (cleanMaterial.image && typeof cleanMaterial.image === 'string' && cleanMaterial.image.startsWith('data:image')) {
+            try {
+                const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, {
+                    folder: 'orders/materials',
+                });
+                materialImageUrl = uploadedMaterial.secure_url;
+            } catch (uploadError) {
+                console.error("Cloudinary material image upload failed:", uploadError);
+                return res.status(500).json({ message: "Failed to upload material image." });
+            }
+        } else if (!cleanMaterial.image) {
+            console.error('Controller Error: Material image is missing (after initial check).');
+            return res.status(400).json({ message: 'Material image is required.' });
+        }
+
+        // Get user details to populate customerName and customerEmail in the order
+        const user = await User.findById(userId);
+        if (!user) {
+            console.error('Controller Error: User not found for ID:', userId);
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const cleanedMeasurements = typeof measurements === 'string' ? measurements.trim() : '';
+
+        // *** START OF THE CRUCIAL CHANGE: Calculate totalPrice here ***
+        const calculatedTotalPrice = cleanStyle.price + (cleanMaterial.pricePerYard * cleanStyle.yardsRequired);
+        console.log(`Controller: Calculated totalPrice before creating Order instance: ${calculatedTotalPrice}`);
+        // *** END OF THE CRUCIAL CHANGE ***
+
+        console.log('Controller: Creating new Order instance...');
+        // Create the order, including the calculated totalPrice
+        const newOrder = new Order({
+            user: userId,
+            customerName: user.name,
+            customerEmail: user.email,
+            orderType: orderType,
+            style: {
+                ...cleanStyle,
+                image: styleImageUrl
+            },
+            material: {
+                ...cleanMaterial,
+                image: materialImageUrl
+            },
+            measurements: cleanedMeasurements,
+            notes: notes || '',
+            status: 'pending',
+            paymentStatus: 'unpaid',
+            totalPrice: calculatedTotalPrice, // <--- Assign the calculated price here
+        });
+
+        console.log('Controller: Calling newOrder.save()...');
+        await newOrder.save(); // The pre-save hook will still run and can re-calculate/verify
+
+        console.log('Controller: Order saved successfully.');
+
+        // Create notification for the user
+        await Notification.create({
+            user: userId,
+            title: 'New Order Placed',
+            message: `Your order for ${newOrder.style.title} has been received and is being processed.`,
+        });
+
+        // Send emails
+        try {
+            await sendEmail({
+                to: user.email,
+                subject: 'Order Confirmation',
+                html: `
+                    <h2>Order Confirmation</h2>
+                    <p>Dear ${user.name},</p>
+                    <p>Your order has been received successfully!</p>
+                    <p><strong>Style:</strong> ${newOrder.style.title}</p>
+                    <p><strong>Material:</strong> ${newOrder.material.name}</p>
+                    <p><strong>Estimated Total:</strong> ₦${newOrder.totalPrice.toLocaleString()}</p>
+                    <p>We'll get back to you soon with updates.</p>
+                `,
+            });
+
+            await sendEmail({
+                to: process.env.ADMIN_EMAIL, // Use an environment variable for admin email
+                subject: 'New Order Received',
+                html: `
+                    <h2>New Order Received!</h2>
+                    <p><strong>Customer:</strong> ${user.name} (${user.email})</p>
+                    <p><strong>Order ID:</strong> ${newOrder._id}</p>
+                    <p><strong>Order Type:</strong> ${newOrder.orderType}</p>
+                    <p><strong>Style:</strong> ${newOrder.style.title}</p>
+                    <p><strong>Material:</strong> ${newOrder.material.name}</p>
+                    <p><strong>Measurements:</strong> ${newOrder.measurements || 'None'}</p> <p><strong>Notes:</strong> ${notes || 'None'}</p>
+                    <p><strong>Total:</strong> ₦${newOrder.totalPrice.toLocaleString()}</p>
+                    <p>Login to the admin panel to manage this order.</p>
+                `,
+            });
+        } catch (emailError) {
+            console.error('Email sending failed:', emailError);
+            // Don't fail the order creation if email fails
+        }
+
+        res.status(201).json({
+            message: 'Order created successfully',
+            order: newOrder
+        });
+
+    } catch (err) {
+        console.error('Order creation error caught in controller:', err);
+        console.error('Full error object:', JSON.stringify(err, null, 2));
+
+        if (err.name === 'ValidationError') {
+            const errors = Object.values(err.errors).map(error => error.message);
+            return res.status(400).json({
+                message: 'Validation failed',
+                errors
+            });
+        }
+
+        res.status(500).json({ message: 'Failed to create order' });
     }
-
-    res.status(201).json({
-      message: 'Order created successfully',
-      order: newOrder
-    });
-
-  } catch (err) {
-    console.error('Order creation error:', err);
-
-    if (err.name === 'ValidationError') {
-      const errors = Object.values(err.errors).map(error => error.message);
-      return res.status(400).json({
-        message: 'Validation failed',
-        errors
-      });
-    }
-
-    res.status(500).json({ message: 'Failed to create order' });
-  }
 };
 
 // GET all orders for a specific user (User dashboard view)

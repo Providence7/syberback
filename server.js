@@ -44,8 +44,8 @@ app.use('/api/notifications', notificationRoutes); // This router uses authentic
 app.use('/api/styles', styleRoutes);
 app.use('/api/currency', currencyRoutes);
 app.use('/api/orders', orderRoutes); // Your online orders route
-
-// --- Database Connection ---
+console.log("hello")
+// --- Dataconsobase Connection ---
 connectDB(); // Ensure this function connects to your MongoDB
 
 // --- Server Start ---
