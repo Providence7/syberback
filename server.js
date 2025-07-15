@@ -10,6 +10,7 @@ import notificationRoutes from './routes/notify.js';
 import styleRoutes from './routes/styleRoutes.js';
 import currencyRoutes from './routes/currency.js';
 import orderRoutes from './routes/order.js'
+import fabricRoutes from './routes/fabricRoutes.js';
 // No need for randomUUID here unless you use it somewhere else not shown
 // const uuid = randomUUID(); // This line is unused and can be removed
 
@@ -42,7 +43,7 @@ app.use('/api/measurements', measurementRoutes);
 app.use('/api/order', inpersonRoute) // Assuming this is for in-person orders
 app.use('/api/notifications', notificationRoutes); // This router uses authenticateUser
 app.use('/api/styles', styleRoutes);
-app.use('/api/currency', currencyRoutes);
+app.use('/api/fabrics', fabricRoutes);
 app.use('/api/orders', orderRoutes); // Your online orders route
 console.log("hello")
 // --- Dataconsobase Connection ---

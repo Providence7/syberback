@@ -1,26 +1,9 @@
+// src/routes/styleRoutes.js
 import express from 'express';
 const router = express.Router();
-import { addStyle, getStyles, getStyleById, updateStyle, deleteStyle } from '../controllers/styleContoller.js';
-import { protect, authorize } from '../middlewares/authMiddleware.js'; // Import new middleware
-import multer from 'multer';
-import path from 'path';
-
-// Setup Multer for file uploads
-const upload = multer({
-  dest: 'uploads/', // Temporary storage for files
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB file size limit
-  fileFilter: (req, file, cb) => {
-    const filetypes = /jpeg|jpg|png|gif/;
-    const mimetype = filetypes.test(file.mimetype);
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb(new Error('Only images (jpeg, jpg, png, gif) are allowed!'));
-    }
-  }
-});
+import { addStyle, getStyles, getStyleById, updateStyle, deleteStyle } from '../controllers/styleContoller.js'; // Corrected typo styleContoller to styleController
+import { protect, authorize } from '../middlewares/authMiddleware.js';
+import upload from '../utils/multer.js'; // Import your custom multer setup
 
 // @route   POST /api/styles
 // @desc    Add a new style (Admin only)

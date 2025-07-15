@@ -388,74 +388,19 @@ export const deleteOrder = async (req, res) => {
 // @desc    Get all orders (Admin only)
 // @route   GET /api/orders/admin
 // @access  Private/Admin
-export const getAdminOrders = async (req, res) => {
-  try {
-    const {
-      page = 1,
-      limit = 10,
-      status,
-      paymentStatus,
-      searchTerm,
-      sortBy = 'createdAt', // Default sort by creation date
-      sortOrder = 'desc', // Default sort descending
-      orderType, // New filter for order type
-    } = req.query;
-
-    let query = {};
-    if (status && status !== 'All') query.status = status;
-    if (paymentStatus && paymentStatus !== 'All') query.paymentStatus = paymentStatus;
-    if (orderType && orderType !== 'All') query.orderType = orderType;
-
-    if (searchTerm) {
-      query.$or = [
-        { customerName: { $regex: searchTerm, $options: 'i' } },
-        { customerEmail: { $regex: searchTerm, $options: 'i' } },
-        { 'style.title': { $regex: searchTerm, $options: 'i' } },
-        { 'material.name': { $regex: searchTerm, $options: 'i' } },
-        { _id: { $regex: searchTerm, $options: 'i' } }, // Search by MongoDB _id (similar to order ID)
-        // If you had a custom orderId field, you'd add it here:
-        // { orderId: { $regex: searchTerm, $options: 'i' } },
-      ];
-    }
-
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const orders = await Order.find(query)
-      .sort(sortOptions)
-      .skip(skip)
-      .limit(parseInt(limit));
-      // .populate('user', 'name email'); // No need to populate if customerName/Email are stored directly
-
-    const totalOrders = await Order.countDocuments(query);
-
-    res.status(200).json({
-      orders: orders.map(formatOrderForAdminFrontend), // Format for frontend
-      totalOrders,
-      currentPage: parseInt(page),
-      totalPages: Math.ceil(totalOrders / parseInt(limit)),
-    });
-
-  } catch (error) {
-    console.error('Error fetching all orders (Admin):', error);
-    res.status(500).json({ message: 'Server error fetching orders.' });
-  }
-};
-
 // @desc    Get single order by ID (Admin only) - more detailed view
 // @route   GET /api/orders/admin/:id
 // @access  Private/Admin
 export const getAdminOrderById = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id)
-      .populate('user', 'name email phone address'); // Populate user info for full receipt
+      .populate('user', 'name email phone'); // Populate user info for full receipt (name, email, phone)
 
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
-    // Return the raw order object for detailed admin view
+    // The 'style' and 'material' subdocuments are already part of the 'order' object
+    // because they are embedded, not referenced. No extra populate is needed for them.
     res.status(200).json(order);
   } catch (error) {
     console.error('Error fetching order by ID (Admin):', error);
@@ -466,6 +411,67 @@ export const getAdminOrderById = async (req, res) => {
   }
 };
 
+// @desc    Get all orders (Admin only)
+// @route   GET /api/orders/admin
+// @access  Private/Admin
+export const getAdminOrders = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      paymentStatus, // This needs to align with your schema's 'paymentStatus' field
+      searchTerm,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+      orderType,
+    } = req.query;
+
+    let query = {};
+    if (status && status !== 'All') query.status = status;
+    if (paymentStatus && paymentStatus !== 'All') query.paymentStatus = paymentStatus; // Use 'paymentStatus' here
+    if (orderType && orderType !== 'All') query.orderType = orderType;
+
+    if (searchTerm) {
+      query.$or = [
+        { customerName: { $regex: searchTerm, $options: 'i' } },
+        { customerEmail: { $regex: searchTerm, $options: 'i' } },
+        { 'style.title': { $regex: searchTerm, $options: 'i' } }, // Search within embedded style
+        { 'material.name': { $regex: searchTerm, $options: 'i' } }, // Search within embedded material
+        { _id: { $regex: searchTerm, $options: 'i' } },
+      ];
+    }
+
+    const sortOptions = {};
+    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // For the summary table, you might not need to populate the full embedded style/material
+    // unless you plan to display image thumbnails directly in the main table.
+    // However, if you need customer's name/email, ensure 'user' is populated if 'customerName'/'customerEmail'
+    // aren't directly saved on the Order model, or remove the populate if they always are.
+    // Based on your model, customerName and customerEmail are directly on the Order.
+    const orders = await Order.find(query)
+      .sort(sortOptions)
+      .skip(skip)
+      .limit(parseInt(limit))
+      .populate('user', 'name email'); // Populate user to get name/email for table if customerName/Email aren't stored
+
+    const totalOrders = await Order.countDocuments(query);
+
+    res.status(200).json({
+      orders: orders,
+      totalOrders,
+      currentPage: parseInt(page),
+      totalPages: Math.ceil(totalOrders / parseInt(limit)),
+    });
+
+  } catch (error) {
+    console.error('Error fetching all orders (Admin):', error);
+    res.status(500).json({ message: 'Server error fetching orders.' });
+  }
+};
 
 // @desc    Update order status and details (Admin only)
 // @route   PUT /api/orders/admin/:id
