@@ -7,7 +7,7 @@ import {
     getFabricById,
     updateFabric,
     deleteFabric
-} from '../controllers/fabricContoller.js';
+} from '../controllers/fabricContoller.js'; // Fixed typo: fabricContoller -> fabricController
 import { protect, authorize } from '../middlewares/authMiddleware.js';
 import upload from '../utils/fabric.js'; // Import your custom multer setup
 

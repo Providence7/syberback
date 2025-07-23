@@ -1,4 +1,3 @@
-// src/models/fabric.js
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
 
@@ -37,7 +36,7 @@ const FabricSchema = new Schema({
     care: {
         type: String,
         required: true,
-        enum: ['Machine washable', 'Hand wash', 'Dry clean only', 'Spot clean'],
+        enum: ['Machine washable', 'Hand wash', 'Dry clean only', 'Spot clean', 'Other'],
         default: 'Machine washable'
     },
     tags: [String], // Array of strings, e.g., ['fashionable', 'versatile', 'high-quality']

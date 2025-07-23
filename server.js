@@ -44,6 +44,7 @@ app.use('/api/order', inpersonRoute) // Assuming this is for in-person orders
 app.use('/api/notifications', notificationRoutes); // This router uses authenticateUser
 app.use('/api/styles', styleRoutes);
 app.use('/api/fabrics', fabricRoutes);
+app.use('/api/currency', currencyRoutes); // Use the new currency routes
 app.use('/api/orders', orderRoutes); // Your online orders route
 console.log("hello")
 // --- Dataconsobase Connection ---
