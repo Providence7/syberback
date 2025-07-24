@@ -71,6 +71,10 @@ const orderSchema = new mongoose.Schema({
     required: true,
     min: 0,
   },
+    expectedDeliveryDate: {
+        type: Date,
+        default: null, // Will be set after order creation for online paid orders
+    },
   paymentReference: {
     type: String,
     unique: true,
