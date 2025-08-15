@@ -6,7 +6,6 @@ import {
   getUserOrders, 
   getOrderById, 
   getAllOrders, 
-  updateOrder, 
   deleteOrder,
   getOrdersByDateRange 
 } from '../controllers/inpersonContoller.js';
@@ -19,8 +18,8 @@ router.get('/in-person/', getUserOrders);
 router.get('/in-person/:orderId', getOrderById);
 
 // Admin routes (add admin middleware)
-router.get('/admin/in-person/',  getAllOrders);
-router.put('/admin/in-person/:orderId',  updateOrder);
+router.get('/admin/in-person/',  getAllOrders); 
+router.get('/admin/in-person/:orderId', getOrderById);
 router.delete('/admin/in-person/:orderId',  deleteOrder);
 router.get('/admin/in-person/date-range', getOrdersByDateRange);
 

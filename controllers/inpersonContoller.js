@@ -4,6 +4,7 @@ import User from '../models/user.js';
 import Notification from '../models/notification.js';
 import nodemailer from 'nodemailer';
 import cron from 'node-cron';
+import { cancelJob } from 'node-schedule';
 
 // Helper function to setup email transporter
 const setupTransporter = () => {
@@ -18,65 +19,69 @@ const setupTransporter = () => {
   });
 };
 
-// Helper function to format phone number
+// Helper function to format phone number (no change needed here)
 const formatPhoneNumber = (phone) => {
-  // Remove any non-digit characters except +
   const cleaned = phone.replace(/[^\d+]/g, '');
-  
-  // If it starts with 0, replace with +234
   if (cleaned.startsWith('0')) {
     return `+234${cleaned.slice(1)}`;
   }
-  
-  // If it starts with 234 but no +, add +
   if (cleaned.startsWith('234') && !cleaned.startsWith('+234')) {
     return `+${cleaned}`;
   }
-  
-  // If it doesn't start with + and isn't 234, assume it's Nigerian and add +234
   if (!cleaned.startsWith('+') && !cleaned.startsWith('234')) {
     return `+234${cleaned}`;
   }
-  
   return cleaned;
 };
 
 // Helper function to schedule email reminders
 const scheduleEmailReminders = async (order) => {
+  // Ensure order.date is a Date object and order.time is available
+  if (!order.date instanceof Date || !order.time) {
+      console.warn(`Cannot schedule reminders for order ${order._id}: invalid date or time.`);
+      return;
+  }
+
   const appointmentDate = new Date(order.date);
   const today = new Date();
-  
-  // Only schedule reminders if appointment is today or in the future
-  if (appointmentDate >= today && order.user?.email) {
-    
-    // Schedule 2 email reminders
+
+  // Parse time and validate
+  let hours, minutes;
+  try {
+    const timeParts = order.time.split(':');
+    if (timeParts.length !== 2) {
+      throw new Error(`Time format expected HH:MM, got: "${order.time}"`);
+    }
+    hours = Number(timeParts[0]);
+    minutes = Number(timeParts[1]);
+
+    if (isNaN(hours) || isNaN(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+      throw new Error(`Invalid hour or minute value: ${order.time}`);
+    }
+  } catch (parseError) {
+    console.error(`Error parsing time for order ${order._id}: ${parseError.message}. Reminder not scheduled.`);
+    return; // Stop scheduling if time is invalid
+  }
+
+
+  // Only schedule reminders if appointment date is today or in the future
+  // and user email exists
+  if (appointmentDate.setHours(0,0,0,0) >= today.setHours(0,0,0,0) && order.user?.email) {
     const reminderTimes = [
-      { 
-        hour: 9, 
-        minute: 0, 
-        subject: 'Appointment Reminder - SyberTailor',
-        message: 'Good morning! This is a reminder that you have an appointment with SyberTailor today.' 
-      },
-      { 
-        hour: 15, 
-        minute: 0, 
-        subject: 'Final Reminder - SyberTailor Appointment',
-        message: 'Good afternoon! Final reminder about your appointment with SyberTailor today.' 
-      }
+      { hour: 9, minute: 0, subject: 'Appointment Reminder - SyberTailor', message: 'Good morning! This is a reminder that you have an appointment with SyberTailor today.' },
+      { hour: 15, minute: 0, subject: 'Final Reminder - SyberTailor Appointment', message: 'Good afternoon! Final reminder about your appointment with SyberTailor today.' }
     ];
-    
+
     reminderTimes.forEach(({ hour, minute, subject, message }) => {
-      const reminderDate = new Date(appointmentDate);
-      reminderDate.setHours(hour, minute, 0, 0);
-      
-      // Only schedule if the reminder time hasn't passed
-      if (reminderDate > new Date()) {
-        const cronTime = `${minute} ${hour} ${reminderDate.getDate()} ${reminderDate.getMonth() + 1} *`;
+      const reminderDateTime = new Date(appointmentDate);
+      reminderDateTime.setHours(hour, minute, 0, 0);
+
+      if (reminderDateTime > new Date()) {
+        const jobName = `inperson_reminder_${order._id.toString()}_${hour}_${minute}`;
         
-        cron.schedule(cronTime, async () => {
+        cron.schedule(reminderDateTime, async () => {
           try {
             const transporter = setupTransporter();
-            
             await transporter.sendMail({
               from: `SyberTailor <${process.env.SMTP_USER}>`,
               to: order.user.email,
@@ -87,7 +92,7 @@ const scheduleEmailReminders = async (order) => {
                 <p>${message}</p>
                 <p><strong>Appointment Details:</strong></p>
                 <ul>
-                  <li><strong>Date:</strong> ${order.date}</li>
+                  <li><strong>Date:</strong> ${order.date.toLocaleDateString()}</li>
                   <li><strong>Time:</strong> ${order.time}</li>
                   <li><strong>Address:</strong> ${order.address}</li>
                   <li><strong>Phone:</strong> ${order.phone}</li>
@@ -96,52 +101,58 @@ const scheduleEmailReminders = async (order) => {
                 <p>Best regards,<br>SyberTailor Team</p>
               `,
             });
-            
-            console.log('Email reminder sent successfully');
+            console.log(`Email reminder sent successfully for order ${order._id} at ${hour}:${minute}`);
           } catch (error) {
-            console.error('Failed to send email reminder:', error);
+            console.error(`Failed to send email reminder for order ${order._id} at ${hour}:${minute}:`, error);
           }
         }, {
           scheduled: true,
           timezone: "Africa/Lagos"
         });
+        console.log(`Scheduled reminder for order ${order._id} at ${reminderDateTime}`);
       }
     });
+  } else {
+      console.log(`Not scheduling reminders for order ${order._id}: appointment in past or no customer email.`);
   }
 };
 
+
 export const createOrder = async (req, res) => {
   try {
-    const { name, phone, address, date, time } = req.body;
-    const userId = req.user?.id || null;
+    const { name, phone, address, date, time, notes, customerId } = req.body;
+    const userId = req.user?.id || customerId || null;
+
+    const appointmentDate = new Date(date);
+    if (isNaN(appointmentDate.getTime())) {
+        return res.status(400).json({ message: 'Invalid date format provided.' });
+    }
 
     const newOrder = await InPersonOrder.create({
       user: userId,
       name,
       phone,
       address,
-      date,
+      date: appointmentDate,
       time,
+      notes,
+      status: 'pending',
     });
 
-    // Populate user info
-    const populatedOrder = await InPersonOrder.findById(newOrder._id).populate('user');
+    const populatedOrder = await InPersonOrder.findById(newOrder._id).populate('user', 'name email');
 
-    // Create notification for the user
-    if (userId) {
+    if (populatedOrder.user) {
       await Notification.create({
-        user: userId,
+        user: populatedOrder.user._id,
         title: 'New Appointment Booked',
-        message: `Your in-person appointment for ${date} at ${time} has been scheduled.`,
+        message: `Your in-person appointment for ${populatedOrder.date.toLocaleDateString()} at ${populatedOrder.time} has been scheduled.`,
       });
     }
 
-    // Setup transporter
     const transporter = setupTransporter();
 
-    // Email content
     const toClient = populatedOrder.user?.email || '';
-    const toAdmin = 'sybertailor@gmail.com';
+    const toAdmin = process.env.ADMIN_EMAIL || 'sybertailor@gmail.com';
 
     const emailSubject = 'SyberTailor Appointment Confirmation';
     const emailBody = `
@@ -149,17 +160,16 @@ export const createOrder = async (req, res) => {
       <p>Dear ${populatedOrder.user?.name || name},</p>
       <p>Your in-person appointment has been scheduled successfully:</p>
       <ul>
-        <li><strong>Date:</strong> ${date}</li>
-        <li><strong>Time:</strong> ${time}</li>
-        <li><strong>Address:</strong> ${address}</li>
-        <li><strong>Phone:</strong> ${phone}</li>
+        <li><strong>Date:</strong> ${populatedOrder.date.toLocaleDateString()}</li>
+        <li><strong>Time:</strong> ${populatedOrder.time}</li>
+        <li><strong>Address:</strong> ${populatedOrder.address}</li>
+        <li><strong>Phone:</strong> ${populatedOrder.phone}</li>
       </ul>
       <p>Please arrive 10 minutes early. You will receive email reminders on the day of your appointment.</p>
       <p>Thank you for choosing SyberTailor!</p>
       <p>Best regards,<br>SyberTailor Team</p>
     `;
 
-    // Send confirmation email
     try {
       await transporter.sendMail({
         from: `SyberTailor <${process.env.SMTP_USER}>`,
@@ -167,60 +177,60 @@ export const createOrder = async (req, res) => {
         subject: emailSubject,
         html: emailBody,
       });
-
       console.log('Confirmation email sent successfully');
     } catch (emailError) {
       console.error('Email sending failed:', emailError);
-      // Don't fail the entire request if email fails
     }
 
-    // Schedule email reminders for the appointment day
     await scheduleEmailReminders(populatedOrder);
 
-    res.status(201).json({ 
+    res.status(201).json({
       message: 'Appointment created successfully! Confirmation sent via email.',
-      order: populatedOrder 
+      order: populatedOrder
     });
 
   } catch (error) {
     console.error('Error creating appointment:', error);
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({ message: 'Validation failed', errors });
+    }
     res.status(500).json({ message: 'Server error creating in-person appointment' });
   }
 };
 
-// GET all in-person orders for a user
+// GET all in-person orders for a user (unchanged)
 export const getUserOrders = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { page = 1, limit = 10, status } = req.query;
+    const { page = 1, limit = 10, status, searchTerm } = req.query;
 
-    // Build filter object
     const filter = { user: userId };
-    if (status) filter.status = status;
+    if (status && status !== 'All') filter.status = status;
+    if (searchTerm) {
+      filter.$or = [
+        { name: { $regex: searchTerm, $options: 'i' } },
+        { phone: { $regex: searchTerm, $options: 'i' } },
+        { address: { $regex: searchTerm, $options: 'i' } },
+      ];
+    }
 
-    // Calculate pagination
-    const skip = (page - 1) * limit;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // Get orders with pagination
     const orders = await InPersonOrder.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
       .populate('user', 'name email');
 
-    // Get total count for pagination
     const totalOrders = await InPersonOrder.countDocuments(filter);
 
     res.status(200).json({
       message: 'In-person orders retrieved successfully',
       orders,
-      pagination: {
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(totalOrders / limit),
-        totalOrders,
-        hasNextPage: page * limit < totalOrders,
-        hasPrevPage: page > 1
-      }
+      totalOrders,
+      currentPage: parseInt(page),
+      totalPages: Math.ceil(totalOrders / parseInt(limit)),
     });
 
   } catch (err) {
@@ -233,9 +243,9 @@ export const getUserOrders = async (req, res) => {
 export const getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const userId = req.user.id;
-
-    const order = await InPersonOrder.findOne({ _id: orderId, user: userId })
+    // Assuming this route is for admin, no need to filter by req.user.id
+    // If it's for regular users to see their own orders, re-add user: req.user.id
+    const order = await InPersonOrder.findById(orderId)
       .populate('user', 'name email');
 
     if (!order) {
@@ -249,180 +259,61 @@ export const getOrderById = async (req, res) => {
 
   } catch (err) {
     console.error('Error fetching in-person order:', err);
-    res.status(500).json({ message: 'Failed to fetch in-person order' });
+    if (err.name === 'CastError') {
+      return res.status(400).json({ message: 'Invalid order ID format.' });
+    }
+    res.status(500).json({ message: 'Failed to fetch in-person order', error: err.message }); // Send JSON error
   }
 };
 
 // GET all in-person orders (Admin only)
 export const getAllOrders = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, userId } = req.query;
+    const { page = 1, limit = 10, status, userId, searchTerm } = req.query;
 
-    // Build filter object
     const filter = {};
-    if (status) filter.status = status;
     if (userId) filter.user = userId;
+    if (searchTerm) {
+        filter.$or = [
+          { name: { $regex: searchTerm, $options: 'i' } },
+          { phone: { $regex: searchTerm, $options: 'i' } },
+          { address: { $regex: searchTerm, $options: 'i' } },
+        ];
+    }
 
-    // Calculate pagination
-    const skip = (page - 1) * limit;
+    // Default: Exclude 'cancelled' orders unless 'All' or 'cancelled' status is explicitly requested
+    if (!status || status === 'non-cancelled') { // 'non-cancelled' is from the frontend's custom param
+        filter.status = { $ne: 'cancelled' };
+    } else if (status && status !== 'All') { // Apply specific status filter if provided (e.g., 'pending', 'confirmed')
+        filter.status = status;
+    }
+    // If status is 'All', no status filter is applied, showing all orders including cancelled
 
-    // Get orders with pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
     const orders = await InPersonOrder.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
       .populate('user', 'name email');
 
-    // Get total count for pagination
     const totalOrders = await InPersonOrder.countDocuments(filter);
 
     res.status(200).json({
       message: 'All in-person orders retrieved successfully',
       orders,
-      pagination: {
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(totalOrders / limit),
-        totalOrders,
-        hasNextPage: page * limit < totalOrders,
-        hasPrevPage: page > 1
-      }
+      totalOrders,
+      currentPage: parseInt(page),
+      totalPages: Math.ceil(totalOrders / parseInt(limit)),
     });
 
   } catch (err) {
     console.error('Error fetching all in-person orders:', err);
-    res.status(500).json({ message: 'Failed to fetch in-person orders' });
+    res.status(500).json({ message: 'Failed to fetch in-person orders', error: err.message }); // Send JSON error
   }
 };
 
-// UPDATE in-person order
-export const updateOrder = async (req, res) => {
-  try {
-    const { orderId } = req.params;
-    const { name, phone, address, date, time, status } = req.body;
-
-    // Find the order
-    const order = await InPersonOrder.findById(orderId);
-    if (!order) {
-      return res.status(404).json({ message: 'In-person order not found' });
-    }
-
-    // Prepare update object
-    const updateData = {};
-    if (name !== undefined) updateData.name = name;
-    if (phone !== undefined) updateData.phone = phone;
-    if (address !== undefined) updateData.address = address;
-    if (date !== undefined) updateData.date = date;
-    if (time !== undefined) updateData.time = time;
-    if (status !== undefined) updateData.status = status;
-
-    // Update the order
-    const updatedOrder = await InPersonOrder.findByIdAndUpdate(
-      orderId,
-      updateData,
-      { new: true, runValidators: true }
-    ).populate('user', 'name email');
-
-    // Create notification for status changes
-    if (status && status !== order.status && updatedOrder.user) {
-      const statusMessages = {
-        'pending': 'Your in-person appointment is being reviewed',
-        'confirmed': 'Your in-person appointment has been confirmed',
-        'in_progress': 'Your appointment is currently in progress',
-        'completed': 'Your in-person appointment has been completed',
-        'cancelled': 'Your in-person appointment has been cancelled'
-      };
-
-      await Notification.create({
-        user: updatedOrder.user._id,
-        title: 'Appointment Status Update',
-        message: statusMessages[status] || 'Your appointment status has been updated.',
-      });
-
-      // Send status update email
-      if (updatedOrder.user.email) {
-        try {
-          const transporter = setupTransporter();
-          
-          await transporter.sendMail({
-            from: `SyberTailor <${process.env.SMTP_USER}>`,
-            to: updatedOrder.user.email,
-            subject: 'Appointment Status Update - SyberTailor',
-            html: `
-              <h2>Appointment Status Update</h2>
-              <p>Dear ${updatedOrder.user.name},</p>
-              <p>Your in-person appointment status has been updated to: <strong>${status.replace('_', ' ').toUpperCase()}</strong></p>
-              <p>${statusMessages[status] || 'Your appointment status has been updated'}.</p>
-              <p><strong>Appointment Details:</strong></p>
-              <ul>
-                <li><strong>Date:</strong> ${updatedOrder.date}</li>
-                <li><strong>Time:</strong> ${updatedOrder.time}</li>
-                <li><strong>Address:</strong> ${updatedOrder.address}</li>
-                <li><strong>Phone:</strong> ${updatedOrder.phone}</li>
-              </ul>
-              <p>Thank you for choosing SyberTailor!</p>
-              <p>Best regards,<br>SyberTailor Team</p>
-            `,
-          });
-        } catch (emailError) {
-          console.error('Email sending failed:', emailError);
-        }
-      }
-    }
-
-    // Send appointment details update email if date/time changed
-    if ((date && date !== order.date) || (time && time !== order.time)) {
-      if (updatedOrder.user && updatedOrder.user.email) {
-        try {
-          const transporter = setupTransporter();
-          
-          await transporter.sendMail({
-            from: `SyberTailor <${process.env.SMTP_USER}>`,
-            to: updatedOrder.user.email,
-            subject: 'Appointment Details Updated - SyberTailor',
-            html: `
-              <h2>Appointment Details Updated</h2>
-              <p>Dear ${updatedOrder.user.name},</p>
-              <p>Your in-person appointment details have been updated:</p>
-              <ul>
-                <li><strong>New Date:</strong> ${updatedOrder.date}</li>
-                <li><strong>New Time:</strong> ${updatedOrder.time}</li>
-                <li><strong>Address:</strong> ${updatedOrder.address}</li>
-                <li><strong>Phone:</strong> ${updatedOrder.phone}</li>
-              </ul>
-              <p>Please make note of these changes. You will receive email reminders on the day of your appointment.</p>
-              <p>Thank you for choosing SyberTailor!</p>
-              <p>Best regards,<br>SyberTailor Team</p>
-            `,
-          });
-
-          // Reschedule email reminders for the new date
-          await scheduleEmailReminders(updatedOrder);
-        } catch (emailError) {
-          console.error('Email sending failed:', emailError);
-        }
-      }
-    }
-
-    res.status(200).json({
-      message: 'In-person order updated successfully',
-      order: updatedOrder
-    });
-
-  } catch (err) {
-    console.error('Error updating in-person order:', err);
-    
-    // Handle validation errors specifically
-    if (err.name === 'ValidationError') {
-      const errors = Object.values(err.errors).map(error => error.message);
-      return res.status(400).json({ 
-        message: 'Validation failed', 
-        errors 
-      });
-    }
-    
-    res.status(500).json({ message: 'Failed to update in-person order' });
-  }
-};
+// REMOVED: updateOrder function, as per user's request for no update capability for in-person orders
 
 // DELETE in-person order (soft delete - change status to cancelled)
 export const deleteOrder = async (req, res) => {
@@ -434,33 +325,32 @@ export const deleteOrder = async (req, res) => {
       return res.status(404).json({ message: 'In-person order not found' });
     }
 
-    // Check if order can be cancelled
-    if (order.status === 'completed' || order.status === 'cancelled') {
-      return res.status(400).json({ 
-        message: 'Cannot cancel appointment that is already completed or cancelled' 
+    if (order.status === 'cancelled') {
+      return res.status(400).json({
+        message: 'Appointment is already cancelled.'
       });
     }
 
-    // Update order status to cancelled
     const updatedOrder = await InPersonOrder.findByIdAndUpdate(
       orderId,
       { status: 'cancelled' },
       { new: true }
     ).populate('user', 'name email');
 
-    // Create notification
+    cancelJob(`inperson_reminder_${orderId.toString()}_9_0`);
+    cancelJob(`inperson_reminder_${orderId.toString()}_15_0`);
+    console.log(`Cancelled scheduled reminders for cancelled order ${orderId}`);
+
     if (updatedOrder.user) {
       await Notification.create({
         user: updatedOrder.user._id,
         title: 'Appointment Cancelled',
-        message: `Your in-person appointment for ${updatedOrder.date} at ${updatedOrder.time} has been cancelled.`,
+        message: `Your in-person appointment for ${updatedOrder.date.toLocaleDateString()} at ${updatedOrder.time} has been cancelled.`,
       });
 
-      // Send cancellation email
       if (updatedOrder.user.email) {
         try {
           const transporter = setupTransporter();
-          
           await transporter.sendMail({
             from: `SyberTailor <${process.env.SMTP_USER}>`,
             to: updatedOrder.user.email,
@@ -470,7 +360,7 @@ export const deleteOrder = async (req, res) => {
               <p>Dear ${updatedOrder.user.name},</p>
               <p>Your in-person appointment has been cancelled:</p>
               <ul>
-                <li><strong>Date:</strong> ${updatedOrder.date}</li>
+                <li><strong>Date:</strong> ${updatedOrder.date.toLocaleDateString()}</li>
                 <li><strong>Time:</strong> ${updatedOrder.time}</li>
                 <li><strong>Address:</strong> ${updatedOrder.address}</li>
               </ul>
@@ -480,7 +370,7 @@ export const deleteOrder = async (req, res) => {
             `,
           });
         } catch (emailError) {
-          console.error('Email sending failed:', emailError);
+          console.error('Email sending failed for cancellation:', emailError);
         }
       }
     }
@@ -492,15 +382,18 @@ export const deleteOrder = async (req, res) => {
 
   } catch (err) {
     console.error('Error cancelling in-person order:', err);
-    res.status(500).json({ message: 'Failed to cancel in-person order' });
+    if (err.name === 'CastError') {
+        return res.status(400).json({ message: 'Invalid order ID format.' });
+    }
+    res.status(500).json({ message: 'Failed to cancel in-person order', error: err.message }); // Send JSON error
   }
 };
 
-// Get orders by date range (useful for scheduling)
+// Get orders by date range (useful for scheduling) (unchanged)
 export const getOrdersByDateRange = async (req, res) => {
   try {
     const { startDate, endDate, status } = req.query;
-    
+
     if (!startDate || !endDate) {
       return res.status(400).json({ message: 'Start date and end date are required' });
     }
@@ -512,7 +405,7 @@ export const getOrdersByDateRange = async (req, res) => {
       }
     };
 
-    if (status) filter.status = status;
+    if (status && status !== 'All') filter.status = status;
 
     const orders = await InPersonOrder.find(filter)
       .sort({ date: 1, time: 1 })
@@ -526,15 +419,15 @@ export const getOrdersByDateRange = async (req, res) => {
 
   } catch (err) {
     console.error('Error fetching orders by date range:', err);
-    res.status(500).json({ message: 'Failed to fetch orders by date range' });
+    res.status(500).json({ message: 'Failed to fetch orders by date range', error: err.message });
   }
 };
 
-// Manual function to send reminder email (for testing)
+// Manual function to send reminder email (for testing) (unchanged)
 export const sendManualReminder = async (req, res) => {
   try {
     const { orderId } = req.params;
-    
+
     const order = await InPersonOrder.findById(orderId).populate('user', 'name email');
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
@@ -545,7 +438,7 @@ export const sendManualReminder = async (req, res) => {
     }
 
     const transporter = setupTransporter();
-    
+
     await transporter.sendMail({
       from: `SyberTailor <${process.env.SMTP_USER}>`,
       to: order.user.email,
@@ -555,7 +448,7 @@ export const sendManualReminder = async (req, res) => {
         <p>Dear ${order.user.name || order.name},</p>
         <p>This is a reminder about your appointment with SyberTailor:</p>
         <ul>
-          <li><strong>Date:</strong> ${order.date}</li>
+          <li><strong>Date:</strong> ${order.date.toLocaleDateString()}</li>
           <li><strong>Time:</strong> ${order.time}</li>
           <li><strong>Address:</strong> ${order.address}</li>
           <li><strong>Phone:</strong> ${order.phone}</li>
@@ -568,21 +461,21 @@ export const sendManualReminder = async (req, res) => {
     res.status(200).json({ message: 'Reminder sent successfully' });
   } catch (error) {
     console.error('Error sending manual reminder:', error);
-    res.status(500).json({ message: 'Failed to send reminder' });
+    res.status(500).json({ message: 'Failed to send reminder', error: error.message });
   }
 };
 
-// Test email function (replacing the WhatsApp test)
+// Test email function (unchanged)
 export const testEmail = async (req, res) => {
   try {
     const { email } = req.body;
-    
+
     if (!email) {
       return res.status(400).json({ message: 'Email address is required' });
     }
-    
+
     const transporter = setupTransporter();
-    
+
     await transporter.sendMail({
       from: `SyberTailor <${process.env.SMTP_USER}>`,
       to: email,
@@ -595,15 +488,15 @@ export const testEmail = async (req, res) => {
         <p>Best regards,<br>SyberTailor Team</p>
       `,
     });
-    
-    res.status(200).json({ 
+
+    res.status(200).json({
       message: 'Test email sent successfully',
       to: email
     });
   } catch (error) {
     console.error('Test email failed:', error);
-    res.status(500).json({ 
-      message: 'Test failed', 
+    res.status(500).json({
+      message: 'Test failed',
       error: error.message
     });
   }
