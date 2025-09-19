@@ -1,4 +1,3 @@
-// src/controllers/inPersonOrderController.js
 import InPersonOrder from '../models/inperson.js';
 import User from '../models/user.js';
 import Notification from '../models/notification.js';
@@ -36,7 +35,6 @@ const formatPhoneNumber = (phone) => {
 
 // Helper function to schedule email reminders
 const scheduleEmailReminders = async (order) => {
-  // Ensure order.date is a Date object and order.time is available
   if (!order.date instanceof Date || !order.time) {
       console.warn(`Cannot schedule reminders for order ${order._id}: invalid date or time.`);
       return;
@@ -45,7 +43,12 @@ const scheduleEmailReminders = async (order) => {
   const appointmentDate = new Date(order.date);
   const today = new Date();
 
-  // Parse time and validate
+  // Create a copy to perform the date-only comparison
+  const appointmentDayStart = new Date(appointmentDate);
+  appointmentDayStart.setHours(0, 0, 0, 0);
+  const todayStart = new Date(today);
+  todayStart.setHours(0, 0, 0, 0);
+
   let hours, minutes;
   try {
     const timeParts = order.time.split(':');
@@ -60,13 +63,11 @@ const scheduleEmailReminders = async (order) => {
     }
   } catch (parseError) {
     console.error(`Error parsing time for order ${order._id}: ${parseError.message}. Reminder not scheduled.`);
-    return; // Stop scheduling if time is invalid
+    return;
   }
 
 
-  // Only schedule reminders if appointment date is today or in the future
-  // and user email exists
-  if (appointmentDate.setHours(0,0,0,0) >= today.setHours(0,0,0,0) && order.user?.email) {
+  if (appointmentDayStart >= todayStart && order.user?.email) {
     const reminderTimes = [
       { hour: 9, minute: 0, subject: 'Appointment Reminder - SyberTailor', message: 'Good morning! This is a reminder that you have an appointment with SyberTailor today.' },
       { hour: 15, minute: 0, subject: 'Final Reminder - SyberTailor Appointment', message: 'Good afternoon! Final reminder about your appointment with SyberTailor today.' }
@@ -120,21 +121,50 @@ const scheduleEmailReminders = async (order) => {
 
 export const createOrder = async (req, res) => {
   try {
-    const { name, phone, address, date, time, notes, customerId } = req.body;
+    const { name, phone, address, appointmentDateTime, notes, customerId } = req.body;
     const userId = req.user?.id || customerId || null;
 
-    const appointmentDate = new Date(date);
-    if (isNaN(appointmentDate.getTime())) {
-        return res.status(400).json({ message: 'Invalid date format provided.' });
+    // Validate incoming date format and parse it
+    const newAppointmentDate = new Date(appointmentDateTime);
+    if (isNaN(newAppointmentDate.getTime())) {
+      return res.status(400).json({ message: 'Invalid date or time format provided.' });
+    }
+    const appointmentTime = newAppointmentDate.toTimeString().slice(0, 5); // Extract HH:MM
+
+    // 🕵️‍♀️ Correctly set the start and end of the day for the query
+    const startOfDay = new Date(newAppointmentDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(newAppointmentDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // Fetch existing appointments for the day, excluding cancelled ones
+    const existingAppointments = await InPersonOrder.find({
+      date: { $gte: startOfDay, $lte: endOfDay },
+      status: { $ne: 'cancelled' }
+    });
+
+    // 🚦 Correct validation for one-hour difference
+    for (const existing of existingAppointments) {
+      // Create a full Date object for the existing appointment
+      const existingDateTime = new Date(existing.date);
+      const [existingHours, existingMinutes] = existing.time.split(':').map(Number);
+      existingDateTime.setHours(existingHours, existingMinutes, 0, 0);
+      
+      const timeDifferenceInMinutes = Math.abs(newAppointmentDate.getTime() - existingDateTime.getTime()) / (1000 * 60);
+
+      if (timeDifferenceInMinutes < 60) {
+        return res.status(409).json({ message: 'This time slot is too close to an existing appointment. Please choose a time at least one hour apart.' });
+      }
     }
 
+    // If validation passes, create the new order
     const newOrder = await InPersonOrder.create({
       user: userId,
       name,
       phone,
       address,
-      date: appointmentDate,
-      time,
+      date: newAppointmentDate,
+      time: appointmentTime,
       notes,
       status: 'pending',
     });
@@ -199,7 +229,6 @@ export const createOrder = async (req, res) => {
   }
 };
 
-// GET all in-person orders for a user (unchanged)
 export const getUserOrders = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -239,12 +268,9 @@ export const getUserOrders = async (req, res) => {
   }
 };
 
-// GET single in-person order by ID
 export const getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
-    // Assuming this route is for admin, no need to filter by req.user.id
-    // If it's for regular users to see their own orders, re-add user: req.user.id
     const order = await InPersonOrder.findById(orderId)
       .populate('user', 'name email');
 
@@ -262,11 +288,10 @@ export const getOrderById = async (req, res) => {
     if (err.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid order ID format.' });
     }
-    res.status(500).json({ message: 'Failed to fetch in-person order', error: err.message }); // Send JSON error
+    res.status(500).json({ message: 'Failed to fetch in-person order', error: err.message });
   }
 };
 
-// GET all in-person orders (Admin only)
 export const getAllOrders = async (req, res) => {
   try {
     const { page = 1, limit = 10, status, userId, searchTerm } = req.query;
@@ -281,13 +306,11 @@ export const getAllOrders = async (req, res) => {
         ];
     }
 
-    // Default: Exclude 'cancelled' orders unless 'All' or 'cancelled' status is explicitly requested
-    if (!status || status === 'non-cancelled') { // 'non-cancelled' is from the frontend's custom param
+    if (!status || status === 'non-cancelled') {
         filter.status = { $ne: 'cancelled' };
-    } else if (status && status !== 'All') { // Apply specific status filter if provided (e.g., 'pending', 'confirmed')
+    } else if (status && status !== 'All') {
         filter.status = status;
     }
-    // If status is 'All', no status filter is applied, showing all orders including cancelled
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -309,13 +332,10 @@ export const getAllOrders = async (req, res) => {
 
   } catch (err) {
     console.error('Error fetching all in-person orders:', err);
-    res.status(500).json({ message: 'Failed to fetch in-person orders', error: err.message }); // Send JSON error
+    res.status(500).json({ message: 'Failed to fetch in-person orders', error: err.message });
   }
 };
 
-// REMOVED: updateOrder function, as per user's request for no update capability for in-person orders
-
-// DELETE in-person order (soft delete - change status to cancelled)
 export const deleteOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -385,11 +405,10 @@ export const deleteOrder = async (req, res) => {
     if (err.name === 'CastError') {
         return res.status(400).json({ message: 'Invalid order ID format.' });
     }
-    res.status(500).json({ message: 'Failed to cancel in-person order', error: err.message }); // Send JSON error
+    res.status(500).json({ message: 'Failed to cancel in-person order', error: err.message });
   }
 };
 
-// Get orders by date range (useful for scheduling) (unchanged)
 export const getOrdersByDateRange = async (req, res) => {
   try {
     const { startDate, endDate, status } = req.query;
@@ -423,7 +442,6 @@ export const getOrdersByDateRange = async (req, res) => {
   }
 };
 
-// Manual function to send reminder email (for testing) (unchanged)
 export const sendManualReminder = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -465,7 +483,6 @@ export const sendManualReminder = async (req, res) => {
   }
 };
 
-// Test email function (unchanged)
 export const testEmail = async (req, res) => {
   try {
     const { email } = req.body;
