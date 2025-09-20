@@ -98,7 +98,6 @@ const scheduleEmailReminders = async (order) => {
                   <li><strong>Address:</strong> ${order.address}</li>
                   <li><strong>Phone:</strong> ${order.phone}</li>
                 </ul>
-                <p>Please arrive 10 minutes early. Thank you!</p>
                 <p>Best regards,<br>SyberTailor Team</p>
               `,
             });
