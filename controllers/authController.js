@@ -20,7 +20,7 @@ function randomToken(length = 32) {
   return crypto.randomBytes(length).toString('hex');
 }// 1. Register (safer: accepts phone, isolates sendEmail errors)
 
-export const registerUser = async (req, res) => {
+export const register = async (req, res) => {
   const { name, email, password, phone } = req.body;
 
   try {
