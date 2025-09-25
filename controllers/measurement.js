@@ -12,6 +12,8 @@ export const createMeasurement = async (req, res) => {
             name: req.body.name,
             unit: req.body.unit,
             gender: req.body.gender,
+            size: req.body.size, // ADDED: Save the size from the request body
+            ageBracket: req.body.ageBracket, // ADDED: Save the ageBracket from the request body
             // Data is already stringified on frontend, parse it here
             data: JSON.parse(req.body.data || '{}'), // Ensure it's an object, default to empty
             photoUrl,
@@ -65,6 +67,8 @@ export const updateMeasurement = async (req, res) => {
             name: req.body.name,
             unit: req.body.unit,
             gender: req.body.gender,
+            size: req.body.size, // ADDED: Update the size
+            ageBracket: req.body.ageBracket, // ADDED: Update the ageBracket
             data: JSON.parse(req.body.data || '{}'), // Parse data, default to empty object
         };
 
@@ -140,8 +144,8 @@ export const checkUserMeasurements = async (req, res) => {
     }
 };
 
-// @desc    Get all measurements (Admin only) with filters and pagination
-// @route   GET /api/measurements/admin
+// @desc      Get all measurements (Admin only) with filters and pagination
+// @route     GET /api/measurements/admin
 export const getAdminMeasurements = async (req, res) => {
     try {
         const {
@@ -169,6 +173,8 @@ export const getAdminMeasurements = async (req, res) => {
             query.$or = [
                 { name: { $regex: searchTerm, $options: 'i' } },
                 { _id: new RegExp(searchTerm, 'i') },
+                { size: { $regex: searchTerm, $options: 'i' } }, // ADDED: Search by size
+                { ageBracket: { $regex: searchTerm, $options: 'i' } }, // ADDED: Search by age
             ];
 
             if (userIds.length > 0) {
@@ -231,9 +237,9 @@ export const getAdminMeasurements = async (req, res) => {
 // You might also want to do this for getMeasurementById and getMeasurements
 // Example for getMeasurementById:
 
-// @desc    Get a single measurement by ID (Admin only)
-// @route   GET /api/measurements/admin/:id
-// @access  Private/Admin
+// @desc      Get a single measurement by ID (Admin only)
+// @route     GET /api/measurements/admin/:id
+// @access    Private/Admin
 export const getAdminMeasurementById = async (req, res) => {
     try {
         const { id } = req.params;
@@ -258,18 +264,20 @@ export const getAdminMeasurementById = async (req, res) => {
     }
 };
 
-// @desc    Update a measurement (Admin only)
-// @route   PUT /api/measurements/admin/:id
-// @access  Private/Admin
+// @desc      Update a measurement (Admin only)
+// @route     PUT /api/measurements/admin/:id
+// @access    Private/Admin
 export const updateMeasurementAdmin = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, unit, gender, data } = req.body;
+        const { name, unit, gender, data, size, ageBracket } = req.body; // ADDED: size and ageBracket to destructuring
 
         const update = {
             name,
             unit,
             gender,
+            size, // ADDED: Update the size
+            ageBracket, // ADDED: Update the ageBracket
             data: JSON.parse(data || '{}'), // Parse data, default to empty object
         };
 
@@ -315,9 +323,9 @@ export const updateMeasurementAdmin = async (req, res) => {
     }
 };
 
-// @desc    Delete a measurement (Admin only)
-// @route   DELETE /api/measurements/admin/:id
-// @access  Private/Admin
+// @desc      Delete a measurement (Admin only)
+// @route     DELETE /api/measurements/admin/:id
+// @access    Private/Admin
 export const deleteMeasurementAdmin = async (req, res) => {
     try {
         const { id } = req.params;
