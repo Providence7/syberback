@@ -18,59 +18,55 @@ import { sendEmail } from '../utils/email.js';
 // Helpers
 function randomToken(length = 32) {
   return crypto.randomBytes(length).toString('hex');
-}// 1. Register (safer: accepts phone, isolates sendEmail errors)
+}
 
-export const register = async (req, res) => {
-  const { name, email, password, phone } = req.body;
+// 1. Register (No changes needed here)
+export async function register(req, res) {
+  const { name, email, password } = req.body;
 
   try {
-    // 1. Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'Email already registered' });
+    if (await User.exists({ email })) {
+      return res.status(400).json({ message: 'Email already in use' });
     }
 
-    // 2. Create new user (unverified)
-    const newUser = await User.create({
+    const user = await User.create({
       name,
       email,
       password,
-      phone,
-      isVerified: false,
-      emailToken: crypto.randomBytes(32).toString('hex'),
-      emailTokenExpires: Date.now() + 3600000, // 1 hour
     });
 
-    // 3. Send verification email
-    const verifyUrl = `${process.env.FRONTEND_URL}/verify?token=${newUser.emailToken}`;
-    const message = `
-      <h1>Email Verification</h1>
-      <p>Click the link below to verify your account:</p>
-      <a href="${verifyUrl}">${verifyUrl}</a>
-    `;
+    const emailCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const emailCodeExpires = Date.now() + 15 * 60 * 1000;
 
-    const emailSent = await sendEmail({
-      to: newUser.email,
-      subject: 'Verify your SyberTailor account',
-      html: message,
+    user.emailToken = emailCode;
+    user.emailTokenExpires = emailCodeExpires;
+    await user.save();
+
+    await sendEmail({
+      to: email,
+      subject: 'Your Email Verification Code',
+      html: `<p>Your verification code is <b>${emailCode}</b>. It expires in 15 minutes.</p>`
     });
-
-    if (!emailSent) {
-      // Rollback user if email fails
-      await User.findByIdAndDelete(newUser._id);
-      return res.status(500).json({ message: 'Failed to send verification email' });
-    }
 
     res.status(201).json({
-      message: 'Registration successful! Please check your email to verify your account.',
+      message: 'Registered! A 6-digit code has been sent to your email.',
+      user: {
+        uniqueId: user.uniqueId,
+        name: user.name,
+        email: user.email,
+        isAdmin: user.isAdmin,
+        isVerified: user.isVerified
+      }
     });
-  } catch (err) {
-    console.error('❌ Registration error:', err.message);
+  } catch (error) {
+    console.error('Registration error:', error);
+    if (error.name === 'ValidationError') {
+        const errors = Object.values(error.errors).map(err => err.message);
+        return res.status(400).json({ message: 'Validation failed', errors });
+    }
     res.status(500).json({ message: 'Server error during registration.' });
   }
-};
-
-
+}
 
 // 2. Verify Email (No changes needed)
 export async function verifyEmail(req, res) {

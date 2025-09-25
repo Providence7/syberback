@@ -20,23 +20,11 @@ transporter.verify((error, success) => {
   }
 });
 
-export async function sendEmail({ to, subject, html }) {
-  if (!transporter) {
-    console.error('📭 No SMTP transporter configured');
-    return false;
-  }
-
-  try {
-    await transporter.sendMail({
-      from: `"SyberTailor" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
-      to,
-      subject,
-      html,
-    });
-    console.log(`✅ Email sent to ${to}`);
-    return true;
-  } catch (err) {
-    console.error('❌ Failed to send email:', err.message);
-    return false;
-  }
+export function sendEmail({ to, subject, html }) {
+  return transporter.sendMail({
+    from: `"SyberTailor" <${process.env.SMTP_USER}>`,
+    to,
+    subject,
+    html,
+  });
 }
