@@ -1,34 +1,71 @@
 import mongoose from 'mongoose';
-const { Schema } = mongoose;
 
-const StyleSchema = new Schema({
-  title: { type: String, required: true, trim: true },
-  type: { type: String, required: true, enum: ['Traditional', 'Casual', 'Modern', 'Corporate', 'Dashiki', 'Suit', 'Dress', 'Jumpsuit'] },
-  gender: { type: String, required: true, enum: ['Male', 'Female', 'Unisex'] },
-  ageGroup: { type: String, required: true, enum: ['Adult', 'Teen', 'Kid'] },
-  price: { type: Number, required: true, min: 0 },
-  image: { type: String, required: true },
-  cloudinary_id: { type: String, required: true },
-  description: { type: String, required: true },
-  details: { type: String, required: true },
-  colour: String,
-  recommendedMaterials: [String],
-  // Removed yardsRequired and added materialQuantities to match the frontend
-  materialQuantities: {
-    type: Map,
-    of: String,
-    default: {} // Set a default empty object to avoid errors
-  },
-  tags: [String],
-  addedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  }
+const StyleSchema = new mongoose.Schema({
+    title: {
+        type: String,
+        required: [true, 'Title is required'],
+        unique: true,
+        trim: true,
+    },
+    // The key change is here: An array of strings that can be empty.
+    type: {
+        type: [String],
+        default: [],
+    },
+    gender: {
+        type: String,
+        required: [true, 'Gender is required'],
+        enum: ['Male', 'Female', 'Unisex'],
+    },
+    ageGroup: {
+        type: String,
+        enum: ['Adult', 'Child', 'Teen', 'Elder'],
+    },
+    price: {
+        type: Number,
+        required: [true, 'Price is required'],
+    },
+    image: {
+        type: String,
+        required: true,
+    },
+    cloudinary_id: {
+        type: String,
+        required: true,
+    },
+    description: {
+        type: String,
+    },
+    details: {
+        type: String,
+    },
+    colour: {
+        type: String,
+    },
+    recommendedMaterials: {
+        type: [String],
+        default: [],
+    },
+    materialQuantities: {
+        type: Map,
+        of: Number,
+        default: {},
+    },
+    tags: {
+        type: [String],
+        default: [],
+    },
+    addedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now,
+    },
+}, {
+    timestamps: true
 });
 
-export default mongoose.model('Style', StyleSchema);
+const Style = mongoose.model('Style', StyleSchema);
+export default Style;
