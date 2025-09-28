@@ -23,6 +23,8 @@ export const transporter = {
 // Nodemailer-style sendEmail wrapper
 export async function sendEmail({ to, subject, html }) {
   try {
+    console.log("📨 Sending email:", { to, subject }); // log before send
+
     const response = await resend.emails.send({
       from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
       to,
@@ -30,7 +32,8 @@ export async function sendEmail({ to, subject, html }) {
       html,
     });
 
-    // Mimic Nodemailer sendMail success return
+    console.log("✅ Email sent via Resend:", response);
+
     return {
       accepted: [to],
       rejected: [],
@@ -38,12 +41,7 @@ export async function sendEmail({ to, subject, html }) {
       messageId: response?.id || null,
     };
   } catch (error) {
-    // Mimic Nodemailer error logging
-    console.error("SMTP connection error:", error);
-    throw {
-      code: error.code || "ESENDFAIL",
-      command: "SEND",
-      message: error.message || "Failed to send email via Resend",
-    };
+    console.error("❌ Email send failed:", error);
+    throw error;
   }
 }
