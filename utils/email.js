@@ -1,37 +1,36 @@
-// src/config/email.js
-import nodemailer from "nodemailer";
-import dotenv from "dotenv";
-
+// src/utils/email.js
+import SibApiV3Sdk from 'sib-api-v3-sdk';
+import dotenv from 'dotenv';
 dotenv.config();
 
-export const transporter = nodemailer.createTransport({
-  host: process.env.BREVO_SMTP_HOST,
-  port: +process.env.BREVO_SMTP_PORT,
-  secure: false, // use TLS
-  auth: {
-    user: process.env.BREVO_SMTP_USER,
-    pass: process.env.BREVO_SMTP_PASS,
-  },
-});
+// Configure Brevo API client
+const client = SibApiV3Sdk.ApiClient.instance;
+client.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
 
-transporter.verify((error, success) => {
-  if (error) {
-    console.error("❌ SMTP connection error:", error);
-  } else {
-    console.log("✅ SMTP ready:", success);
-  }
-});
+const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
 
+/**
+ * Send an email using Brevo API
+ * @param {Object} options
+ * @param {string} options.to - Recipient email address
+ * @param {string} options.subject - Email subject
+ * @param {string} options.html - Email HTML content
+ */
 export async function sendEmail({ to, subject, html }) {
   try {
-    const info = await transporter.sendMail({
-      from: `"SyberTailor" <${process.env.BREVO_FROM_EMAIL}>`,
-      to,
+    const sendSmtpEmail = {
+      to: [{ email: to }],
+      sender: { 
+        email: process.env.BREVO_FROM_EMAIL || "no-reply@syber.onrender.com",
+        name: "SyberTailor"
+      },
       subject,
-      html,
-    });
-    console.log("📨 Email sent:", info.messageId);
-    return info;
+      htmlContent: html,
+    };
+
+    const response = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log(`✅ Email sent to ${to}:`, response.messageId || response);
+    return response;
   } catch (error) {
     console.error("❌ Failed to send email:", error);
     throw error;
