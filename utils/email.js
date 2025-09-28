@@ -1,47 +1,39 @@
-// email.js
+// src/config/email.js
+import nodemailer from "nodemailer";
 import dotenv from "dotenv";
-import { Resend } from "resend";
 
 dotenv.config();
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-// Nodemailer-style transporter mock
-export const transporter = {
-  verify: (cb) => {
-    if (!process.env.RESEND_API_KEY) {
-      const err = new Error("Missing RESEND_API_KEY");
-      console.error("SMTP connection error:", err);
-      cb(err, null);
-    } else {
-      console.log("Resend API key loaded, ready to send.");
-      cb(null, true);
-    }
+export const transporter = nodemailer.createTransport({
+  host: process.env.BREVO_SMTP_HOST,
+  port: +process.env.BREVO_SMTP_PORT,
+  secure: false, // use TLS
+  auth: {
+    user: process.env.BREVO_SMTP_USER,
+    pass: process.env.BREVO_SMTP_PASS,
   },
-};
+});
 
-// Nodemailer-style sendEmail wrapper
+transporter.verify((error, success) => {
+  if (error) {
+    console.error("❌ SMTP connection error:", error);
+  } else {
+    console.log("✅ SMTP ready:", success);
+  }
+});
+
 export async function sendEmail({ to, subject, html }) {
   try {
-    console.log("📨 Sending email:", { to, subject }); // log before send
-
-    const response = await resend.emails.send({
-      from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
+    const info = await transporter.sendMail({
+      from: `"SyberTailor" <${process.env.BREVO_FROM_EMAIL}>`,
       to,
       subject,
       html,
     });
-
-    console.log("✅ Email sent via Resend:", response);
-
-    return {
-      accepted: [to],
-      rejected: [],
-      response: "250 Message queued by Resend",
-      messageId: response?.id || null,
-    };
+    console.log("📨 Email sent:", info.messageId);
+    return info;
   } catch (error) {
-    console.error("❌ Email send failed:", error);
+    console.error("❌ Failed to send email:", error);
     throw error;
   }
 }
