@@ -1,8 +1,7 @@
-// src/controllers/authController.js
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import User from '../models/user.js';
-import Order from '../models/order.js'; // Import the Order model
+import Order from '../models/order.js';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 
@@ -20,7 +19,15 @@ function randomToken(length = 32) {
   return crypto.randomBytes(length).toString('hex');
 }
 
-// 1. Register (No changes needed here)
+// --- Unified cookie options ---
+const getCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production', // required for iPhone Safari (must be HTTPS)
+  sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // Safari needs None on cross-site
+  path: '/',
+});
+
+// 1. Register
 export async function register(req, res) {
   const { name, email, password } = req.body;
 
@@ -61,14 +68,14 @@ export async function register(req, res) {
   } catch (error) {
     console.error('Registration error:', error);
     if (error.name === 'ValidationError') {
-        const errors = Object.values(error.errors).map(err => err.message);
-        return res.status(400).json({ message: 'Validation failed', errors });
+      const errors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({ message: 'Validation failed', errors });
     }
     res.status(500).json({ message: 'Server error during registration.' });
   }
 }
 
-// 2. Verify Email (No changes needed)
+// 2. Verify Email
 export async function verifyEmail(req, res) {
   const { email, code } = req.body;
   try {
@@ -87,38 +94,7 @@ export async function verifyEmail(req, res) {
   }
 }
 
-// 9. Resend Email Verification Code (No changes needed)
-export async function resendVerification(req, res) {
-  const { email } = req.body;
-  try {
-    if (!email) {
-      return res.status(400).json({ message: 'Email is required' });
-    }
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    if (user.isVerified) {
-      return res.status(400).json({ message: 'User already verified' });
-    }
-    const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const codeExpires = Date.now() + 15 * 60 * 1000;
-    user.emailToken = newCode;
-    user.emailTokenExpires = codeExpires;
-    await user.save();
-    await sendEmail({
-      to: email,
-      subject: 'Your New Verification Code',
-      html: `<p>Your new verification code is <b>${newCode}</b>. It expires in 15 minutes.</p>`
-    });
-    res.json({ message: 'Verification code resent' });
-  } catch (error) {
-    console.error('Resend verification error:', error);
-    res.status(500).json({ message: 'Server error during resending verification code.' });
-  }
-}
-
-// 3. Login (No changes needed here)
+// 3. Login
 export async function login(req, res) {
   const { email, password } = req.body;
   try {
@@ -126,120 +102,140 @@ export async function login(req, res) {
     if (!user || !(await user.matchPassword(password))) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
+
     if (!user.isVerified) {
       return res.status(403).json({ message: 'Please verify your email first' });
     }
+
     const accessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
     const refreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
+
     user.refreshToken = refreshToken;
     await user.save();
-    const isProd = process.env.NODE_ENV === 'production';
-    const cookieOptions = {
-      httpOnly: true, secure: isProd, sameSite: isProd ? 'None' : 'Lax', path: '/',
-    };
+
+    const cookieOptions = getCookieOptions();
+
     res
       .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
       .cookie('refreshToken', refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
       .json({
         message: 'Login successful',
         user: {
-          uniqueId: user.uniqueId, name: user.name, email: user.email, isAdmin: user.isAdmin
+          uniqueId: user.uniqueId,
+          name: user.name,
+          email: user.email,
+          isAdmin: user.isAdmin
         }
       });
+
+    // Debug: Verify cookies actually sent (helpful in Safari)
+    console.log('✅ Cookies sent:', res.getHeaders()['set-cookie']);
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ message: 'Server error during login.' });
   }
 }
 
-// 4. Logout (No changes needed)
+// 4. Logout
 export async function logout(req, res) {
-  if (req.user && req.user.id) {
-    try {
+  try {
+    if (req.user && req.user.id) {
       await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
-      console.log(`User ${req.user.id} refresh token revoked from database.`);
-    } catch (error) {
-      console.error('Error revoking refresh token from database on logout:', error);
+      console.log(`User ${req.user.id} refresh token revoked.`);
     }
-  } else {
-    console.warn('Logout called without an authenticated user. Cannot revoke refresh token from DB.');
+
+    const cookieOptions = getCookieOptions();
+
+    res
+      .clearCookie('accessToken', cookieOptions)
+      .clearCookie('refreshToken', cookieOptions)
+      .sendStatus(204);
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ message: 'Server error during logout.' });
   }
-  const isProd = process.env.NODE_ENV === 'production';
-  const cookieClearOptions = {
-    httpOnly: true, secure: isProd, sameSite: isProd ? 'None' : 'Lax', path: '/',
-  };
-  res
-    .clearCookie('accessToken', cookieClearOptions)
-    .clearCookie('refreshToken', cookieClearOptions)
-    .sendStatus(204);
 }
 
-// 5. Refresh (No changes needed)
+// 5. Refresh
 export async function refresh(req, res) {
   const token = req.cookies.refreshToken;
   if (!token) {
     console.warn('Refresh attempt: No refresh token in cookies.');
     return res.sendStatus(401);
   }
-  let payload;
+
   try {
-    payload = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
+    const payload = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
+    const user = await User.findById(payload.id);
+
+    if (!user || user.refreshToken !== token) {
+      console.warn('Refresh attempt: Invalid or revoked refresh token.');
+      return res.sendStatus(403);
+    }
+
+    const newAccessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
+    const newRefreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
+
+    user.refreshToken = newRefreshToken;
+    await user.save();
+
+    const cookieOptions = getCookieOptions();
+
+    res
+      .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
+      .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
+      .json({ message: 'Tokens refreshed' });
+
+    console.log('✅ Refresh cookies sent:', res.getHeaders()['set-cookie']);
   } catch (err) {
-    console.error('Refresh attempt: JWT verification failed for refresh token:', err.message);
-    return res.sendStatus(403);
+    console.error('Refresh token error:', err);
+    res.sendStatus(403);
   }
-  const user = await User.findById(payload.id);
-  if (!user || user.refreshToken !== token) {
-    console.warn('Refresh attempt: User not found or refresh token mismatch/revoked.');
-    return res.sendStatus(403);
-  }
-  const newAccessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
-  const newRefreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
-  user.refreshToken = newRefreshToken;
-  await user.save();
-  const isProd = process.env.NODE_ENV === 'production';
-  const cookieOptions = {
-    httpOnly: true, secure: isProd, sameSite: isProd ? 'None' : 'Lax', path: '/',
-  };
-  res
-    .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
-    .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
-    .json({ message: 'Tokens refreshed' });
 }
 
-// 6. Me (No changes needed)
+// 6. Me
 export async function me(req, res) {
   if (!req.user) {
-    console.warn('Me endpoint accessed without req.user populated. Check middleware setup.');
+    console.warn('Me endpoint accessed without req.user populated.');
     return res.status(401).json({ message: 'Not authenticated' });
   }
+
   res.json({
     user: {
-      uniqueId: req.user.uniqueId, name: req.user.name, email: req.user.email,
-      isAdmin: req.user.isAdmin, isVerified: req.user.isVerified,
-      phone: req.user.phone, address: req.user.address,
+      uniqueId: req.user.uniqueId,
+      name: req.user.name,
+      email: req.user.email,
+      isAdmin: req.user.isAdmin,
+      isVerified: req.user.isVerified,
+      phone: req.user.phone,
+      address: req.user.address,
     },
   });
 }
 
-// 7. Request Password Reset (No changes needed)
+// 7. Request Password Reset
 export async function requestPasswordReset(req, res) {
   const { email } = req.body;
   try {
     const user = await User.findOne({ email });
     if (!user) return res.sendStatus(204);
+
     const resetToken = randomToken();
     user.resetToken = resetToken;
     user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
     await user.save();
+
     const resetURL = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}&id=${user._id}`;
+
     await sendEmail({
-      to: email, subject: 'Password Reset for SyberTailor',
-      html: `<p>You are receiving this because you (or someone else) have requested the reset of the password for your account.</p>
-             <p>Please click on the following link, or paste this into your browser to complete the process:</p>
-             <p><a href="${resetURL}">${resetURL}</a></p>
-             <p>If you did not request this, please ignore this email and your password will remain unchanged.</p>`
+      to: email,
+      subject: 'Password Reset for SyberTailor',
+      html: `
+        <p>You requested a password reset.</p>
+        <p><a href="${resetURL}">${resetURL}</a></p>
+      `,
     });
+
     res.json({ message: 'If the email exists, a password reset link has been sent.' });
   } catch (error) {
     console.error('Request password reset error:', error);
@@ -247,18 +243,23 @@ export async function requestPasswordReset(req, res) {
   }
 }
 
-// 8. Reset Password (No changes needed)
+// 8. Reset Password
 export async function resetPassword(req, res) {
   const { id, token, password } = req.body;
   try {
     const user = await User.findOne({
-      _id: id, resetToken: token, resetTokenExpires: { $gt: Date.now() }
+      _id: id,
+      resetToken: token,
+      resetTokenExpires: { $gt: Date.now() },
     }).select('+password');
+
     if (!user) return res.status(400).json({ message: 'Invalid or expired reset token' });
+
     user.password = password;
     user.resetToken = undefined;
     user.resetTokenExpires = undefined;
     await user.save();
+
     res.json({ message: 'Password reset successful' });
   } catch (error) {
     console.error('Reset password error:', error);
@@ -266,11 +267,11 @@ export async function resetPassword(req, res) {
   }
 }
 
-// Get user profile (for the authenticated user) (No changes needed)
+// Get Profile
 export const getProfile = async (req, res) => {
   try {
     if (!req.user) {
-        return res.status(401).json({ message: 'Not authenticated or user data missing.' });
+      return res.status(401).json({ message: 'Not authenticated or user data missing.' });
     }
     res.json(req.user);
   } catch (err) {
@@ -279,21 +280,24 @@ export const getProfile = async (req, res) => {
   }
 };
 
-// Update user profile (No changes needed)
+// Update Profile
 export const updateProfile = async (req, res) => {
   try {
     const { name, email, phone, address } = req.body;
     if (!req.user || !req.user.id) {
-        return res.status(401).json({ message: 'Not authenticated or user ID missing.' });
+      return res.status(401).json({ message: 'Not authenticated or user ID missing.' });
     }
+
     const updatedUser = await User.findByIdAndUpdate(
       req.user.id,
       { name, email, phone, address },
       { new: true, runValidators: true }
     ).select('-password');
+
     if (!updatedUser) {
-        return res.status(404).json({ message: 'User not found for update.' });
+      return res.status(404).json({ message: 'User not found for update.' });
     }
+
     res.json({ message: 'Profile updated successfully', user: updatedUser });
   } catch (err) {
     console.error('Update profile error:', err);
@@ -304,11 +308,7 @@ export const updateProfile = async (req, res) => {
   }
 };
 
-// --- ADMIN FUNCTIONS (No changes needed here) ---
-
-// @desc    Get all users (Admin only)
-// @route   GET /api/auth/admin/users
-// @access  Private/Admin
+// --- ADMIN FUNCTIONS ---
 export const getAllUsers = async (req, res) => {
   try {
     const users = await User.find({}).select('-password -refreshToken');
@@ -319,9 +319,6 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
-// @desc    Get user by ID (Admin only)
-// @route   GET /api/auth/admin/users/:id
-// @access  Private/Admin
 export const getUserById = async (req, res) => {
   try {
     const userId = req.params.id;
