@@ -2,7 +2,7 @@
 import express from 'express';
 import {
   register, verifyEmail, login, logout, updateProfile, getProfile,
-  refresh, me, requestPasswordReset, resetPassword, resendVerification, getUserById, updateUser, deleteUser,
+  refresh, me, requestPasswordReset, resetPassword,  getUserById, updateUser, deleteUser,
   getAllUsers, // Existing admin functions
   getAdminDashboardStats // NEW: Import the dashboard stats function
 } from '../controllers/authController.js';
@@ -17,7 +17,7 @@ router.post('/verify-email', verifyEmail);
 router.post('/login', login);
 router.post('/request-reset', requestPasswordReset);
 router.post('/reset-password', resetPassword);
-router.post('/resend-verification', resendVerification);
+// router.post('/resend-verification', resendVerification);
 router.post('/refresh', refresh);
 
 // Protected routes (requires any authenticated user)
