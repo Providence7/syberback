@@ -21,9 +21,12 @@ const app = express();
 
 // 1. CORS Middleware: Should be first to handle preflight requests and set headers correctly for all origins.
 app.use(cors({
-  origin: process.env.CLIENT_URL, // your frontend origin (e.g., http://localhost:5173)
-  credentials: true, // Crucial for allowing cookies to be sent/received
+  origin: process.env.CLIENT_URL,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+
 
 // 2. Body Parsing Middleware: For handling JSON request bodies.
 app.use(express.json());
