@@ -1,81 +1,72 @@
+// src/controllers/authController.js
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import User from '../models/user.js';
-import Order from '../models/order.js';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-
-dotenv.config();
-
+import User from '../models/user.js';
+import Order from '../models/order.js';
+import { sendEmail } from '../utils/email.js';
 import {
   signAccessToken,
   signRefreshToken,
-  verifyRefreshToken
 } from '../utils/jwt.js';
-import { sendEmail } from '../utils/email.js';
 
-// Helpers
-function randomToken(length = 32) {
-  return crypto.randomBytes(length).toString('hex');
-}
+dotenv.config();
 
-// --- Unified cookie options ---
+// ------------------------------
+// 🔧 Helpers
+// ------------------------------
+const randomToken = (length = 32) => crypto.randomBytes(length).toString('hex');
+
+// ✅ Consistent secure cookie options
 const getCookieOptions = () => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production', // required for iPhone Safari (must be HTTPS)
-  sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // Safari needs None on cross-site
+  secure: process.env.NODE_ENV === 'production', // HTTPS-only cookies in production
+  sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // Cross-site compatible
   path: '/',
 });
 
-// 1. Register
+// ------------------------------
+// 👤 Register
+// ------------------------------
 export async function register(req, res) {
   const { name, email, password } = req.body;
-
   try {
     if (await User.exists({ email })) {
       return res.status(400).json({ message: 'Email already in use' });
     }
 
-    const user = await User.create({
-      name,
-      email,
-      password,
-    });
+    const user = await User.create({ name, email, password });
 
     const emailCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const emailCodeExpires = Date.now() + 15 * 60 * 1000;
-
     user.emailToken = emailCode;
-    user.emailTokenExpires = emailCodeExpires;
+    user.emailTokenExpires = Date.now() + 15 * 60 * 1000;
     await user.save();
 
     await sendEmail({
       to: email,
-      subject: 'Your Email Verification Code',
-      html: `<p>Your verification code is <b>${emailCode}</b>. It expires in 15 minutes.</p>`
+      subject: 'Verify Your Email - SyberTailor',
+      html: `<p>Your verification code is <b>${emailCode}</b>. It expires in 15 minutes.</p>`,
     });
 
     res.status(201).json({
-      message: 'Registered! A 6-digit code has been sent to your email.',
+      message: 'Registered! A 6-digit verification code was sent to your email.',
       user: {
-        uniqueId: user.uniqueId,
         name: user.name,
         email: user.email,
         isAdmin: user.isAdmin,
-        isVerified: user.isVerified
-      }
+        isVerified: user.isVerified,
+      },
     });
   } catch (error) {
     console.error('Registration error:', error);
-    if (error.name === 'ValidationError') {
-      const errors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ message: 'Validation failed', errors });
-    }
     res.status(500).json({ message: 'Server error during registration.' });
   }
 }
 
-// 2. Verify Email
+// ------------------------------
+// ✉️ Verify Email
+// ------------------------------
 export async function verifyEmail(req, res) {
   const { email, code } = req.body;
   try {
@@ -83,20 +74,25 @@ export async function verifyEmail(req, res) {
     if (!user || user.emailTokenExpires < Date.now()) {
       return res.status(400).json({ message: 'Invalid or expired verification code' });
     }
+
     user.isVerified = true;
     user.emailToken = undefined;
     user.emailTokenExpires = undefined;
     await user.save();
-    res.json({ message: 'Email verified!' });
+
+    res.json({ message: 'Email verified successfully!' });
   } catch (error) {
     console.error('Email verification error:', error);
     res.status(500).json({ message: 'Server error during email verification.' });
   }
 }
 
-// 3. Login
+// ------------------------------
+// 🔑 Login
+// ------------------------------
 export async function login(req, res) {
   const { email, password } = req.body;
+
   try {
     const user = await User.findOne({ email }).select('+password');
     if (!user || !(await user.matchPassword(password))) {
@@ -121,14 +117,13 @@ export async function login(req, res) {
       .json({
         message: 'Login successful',
         user: {
-          uniqueId: user.uniqueId,
           name: user.name,
           email: user.email,
-          isAdmin: user.isAdmin
-        }
+          isAdmin: user.isAdmin,
+          isVerified: user.isVerified,
+        },
       });
 
-    // Debug: Verify cookies actually sent (helpful in Safari)
     console.log('✅ Cookies sent:', res.getHeaders()['set-cookie']);
   } catch (error) {
     console.error('Login error:', error);
@@ -136,16 +131,17 @@ export async function login(req, res) {
   }
 }
 
-// 4. Logout
+// ------------------------------
+// 🚪 Logout
+// ------------------------------
 export async function logout(req, res) {
   try {
-    if (req.user && req.user.id) {
+    if (req.user?.id) {
       await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
-      console.log(`User ${req.user.id} refresh token revoked.`);
+      console.log(`User ${req.user.id} logged out, refresh token revoked.`);
     }
 
     const cookieOptions = getCookieOptions();
-
     res
       .clearCookie('accessToken', cookieOptions)
       .clearCookie('refreshToken', cookieOptions)
@@ -156,9 +152,12 @@ export async function logout(req, res) {
   }
 }
 
-// 5. Refresh
+// ------------------------------
+// ♻️ Refresh Tokens
+// ------------------------------
 export async function refresh(req, res) {
-  const token = req.cookies.refreshToken;
+  const token = req.cookies?.refreshToken;
+
   if (!token) {
     console.warn('Refresh attempt: No refresh token in cookies.');
     return res.sendStatus(401);
@@ -180,40 +179,38 @@ export async function refresh(req, res) {
     await user.save();
 
     const cookieOptions = getCookieOptions();
-
     res
       .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
       .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
-      .json({ message: 'Tokens refreshed' });
+      .json({ message: 'Tokens refreshed successfully' });
 
     console.log('✅ Refresh cookies sent:', res.getHeaders()['set-cookie']);
   } catch (err) {
-    console.error('Refresh token error:', err);
+    console.error('Refresh token error:', err.message);
     res.sendStatus(403);
   }
 }
 
-// 6. Me
+// ------------------------------
+// 👥 Me
+// ------------------------------
 export async function me(req, res) {
-  if (!req.user) {
-    console.warn('Me endpoint accessed without req.user populated.');
-    return res.status(401).json({ message: 'Not authenticated' });
-  }
+  if (!req.user) return res.status(401).json({ message: 'Not authenticated' });
 
   res.json({
     user: {
-      uniqueId: req.user.uniqueId,
+      id: req.user._id,
       name: req.user.name,
       email: req.user.email,
       isAdmin: req.user.isAdmin,
       isVerified: req.user.isVerified,
-      phone: req.user.phone,
-      address: req.user.address,
     },
   });
 }
 
-// 7. Request Password Reset
+// ------------------------------
+// 🔄 Password Reset
+// ------------------------------
 export async function requestPasswordReset(req, res) {
   const { email } = req.body;
   try {
@@ -226,24 +223,19 @@ export async function requestPasswordReset(req, res) {
     await user.save();
 
     const resetURL = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}&id=${user._id}`;
-
     await sendEmail({
       to: email,
-      subject: 'Password Reset for SyberTailor',
-      html: `
-        <p>You requested a password reset.</p>
-        <p><a href="${resetURL}">${resetURL}</a></p>
-      `,
+      subject: 'Reset your SyberTailor password',
+      html: `<p>Click the link below to reset your password:</p><a href="${resetURL}">${resetURL}</a>`,
     });
 
-    res.json({ message: 'If the email exists, a password reset link has been sent.' });
+    res.json({ message: 'Password reset link sent to your email.' });
   } catch (error) {
     console.error('Request password reset error:', error);
     res.status(500).json({ message: 'Server error during password reset request.' });
   }
 }
 
-// 8. Reset Password
 export async function resetPassword(req, res) {
   const { id, token, password } = req.body;
   try {
@@ -253,20 +245,19 @@ export async function resetPassword(req, res) {
       resetTokenExpires: { $gt: Date.now() },
     }).select('+password');
 
-    if (!user) return res.status(400).json({ message: 'Invalid or expired reset token' });
+    if (!user) return res.status(400).json({ message: 'Invalid or expired token' });
 
     user.password = password;
     user.resetToken = undefined;
     user.resetTokenExpires = undefined;
     await user.save();
 
-    res.json({ message: 'Password reset successful' });
+    res.json({ message: 'Password reset successful.' });
   } catch (error) {
     console.error('Reset password error:', error);
     res.status(500).json({ message: 'Server error during password reset.' });
   }
 }
-
 // Get Profile
 export const getProfile = async (req, res) => {
   try {
