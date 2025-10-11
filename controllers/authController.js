@@ -168,10 +168,10 @@ export async function refresh(req, res) {
     const user = await User.findById(payload.id);
 
     if (!user || user.refreshToken !== token) {
-      console.warn('Refresh attempt: Invalid or revoked refresh token.');
+   
       return res.sendStatus(403);
     }
-
+   console.warn('Refresh attempt: Invalid or revoked refresh token.');
     const newAccessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
     const newRefreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
 
@@ -184,7 +184,7 @@ export async function refresh(req, res) {
       .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
       .json({ message: 'Tokens refreshed successfully' });
 
-    console.log('✅ Refresh cookies sent:', res.getHeaders()['set-cookie']);
+ 
   } catch (err) {
     console.error('Refresh token error:', err.message);
     res.sendStatus(403);
