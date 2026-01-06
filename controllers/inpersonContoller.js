@@ -33,6 +33,7 @@ export const createOrder = async (req, res) => {
 
     const appointmentTime = appointmentDate.toTimeString().slice(0, 5);
 
+    // Availability check
     const startOfDay = new Date(appointmentDate);
     startOfDay.setHours(0, 0, 0, 0);
 
@@ -59,6 +60,7 @@ export const createOrder = async (req, res) => {
       }
     }
 
+    // ✅ CORE ACTION
     const newOrder = await InPersonOrder.create({
       user: userId,
       name,
@@ -73,45 +75,57 @@ export const createOrder = async (req, res) => {
     const populatedOrder = await InPersonOrder.findById(newOrder._id)
       .populate('user', 'name email');
 
-    if (populatedOrder.user) {
-      await Notification.create({
-        user: populatedOrder.user._id,
-        title: 'New Appointment Booked',
-        message: `Your appointment is scheduled for ${populatedOrder.date.toLocaleDateString()} at ${populatedOrder.time}.`,
-      });
+    // 🟡 SIDE EFFECTS (NON-BLOCKING)
+    try {
+      if (populatedOrder.user) {
+        await Notification.create({
+          user: populatedOrder.user._id,
+          title: 'New Appointment Booked',
+          message: `Your appointment is scheduled for ${populatedOrder.date.toLocaleDateString()} at ${populatedOrder.time}.`,
+        });
+      }
+
+      const transporter = setupTransporter();
+      const recipients = [
+        populatedOrder.user?.email,
+        process.env.ADMIN_EMAIL,
+      ].filter(Boolean);
+
+      if (recipients.length) {
+        await transporter.sendMail({
+          from: `AttireByte <${process.env.SMTP_USER}>`,
+          to: recipients.join(','),
+          subject: 'Appointment Confirmation',
+          html: `
+            <h2>Appointment Confirmation</h2>
+            <ul>
+              <li>Date: ${populatedOrder.date.toLocaleDateString()}</li>
+              <li>Time: ${populatedOrder.time}</li>
+              <li>Address: ${populatedOrder.address}</li>
+              <li>Phone: ${populatedOrder.phone}</li>
+            </ul>
+          `,
+        });
+      }
+    } catch (sideEffectError) {
+      console.warn('Post-create task failed:', sideEffectError.message);
     }
 
-    const transporter = setupTransporter();
-    const recipients = [
-      populatedOrder.user?.email,
-      process.env.ADMIN_EMAIL,
-    ].filter(Boolean);
-
-    await transporter.sendMail({
-      from: `SyberTailor <${process.env.SMTP_USER}>`,
-      to: recipients.join(','),
-      subject: 'SyberTailor Appointment Confirmation',
-      html: `
-        <h2>Appointment Confirmation</h2>
-        <ul>
-          <li>Date: ${populatedOrder.date.toLocaleDateString()}</li>
-          <li>Time: ${populatedOrder.time}</li>
-          <li>Address: ${populatedOrder.address}</li>
-          <li>Phone: ${populatedOrder.phone}</li>
-        </ul>
-      `,
-    });
-
+    // ✅ ALWAYS RETURN SUCCESS IF ORDER IS CREATED
     return res.status(201).json({
       message: 'Appointment created successfully.',
       order: populatedOrder,
     });
 
   } catch (error) {
-    console.error('Create appointment error:', error);
-    return res.status(500).json({ message: 'Server error creating appointment.' });
+    console.error('Create appointment fatal error:', error);
+    return res.status(500).json({
+      message: 'Failed to create appointment.',
+      error: error.message,
+    });
   }
 };
+
 
 /* ===============================
    USER ORDERS
