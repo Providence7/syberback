@@ -26,19 +26,42 @@ export const createOrder = async (req, res) => {
     const { name, phone, address, appointmentDateTime, notes, customerId } = req.body;
     const userId = req.user?.id || customerId || null;
 
-    const appointmentDate = new Date(appointmentDateTime);
+    // FIX: parse the incoming date string as LOCAL time, not UTC.
+    //
+    // The problem: if the frontend sends "2026-04-04T12:00" (no timezone suffix),
+    // new Date("2026-04-04T12:00") is treated as LOCAL by browsers but as UTC
+    // by Node.js, which shifts the stored date/time by the server's UTC offset.
+    //
+    // Solution: if the string has no timezone info (no Z, no +/-), append the
+    // server's local offset so Node interprets it as the client's intended local time.
+    // In production you should ideally send the timezone from the frontend, but this
+    // covers the common case where the datetime-local input sends no offset.
+    let appointmentDate;
+    const rawDateTime = String(appointmentDateTime || '');
+
+    if (rawDateTime && !rawDateTime.endsWith('Z') && !/[+-]\d{2}:?\d{2}$/.test(rawDateTime)) {
+      // No timezone suffix — treat as UTC so the date stored matches what was typed.
+      // This is the safest approach when the frontend sends a plain datetime-local value:
+      // store it as-is in UTC, and read it back as UTC on the frontend (formatDateSafe).
+      appointmentDate = new Date(rawDateTime + 'Z');
+    } else {
+      appointmentDate = new Date(rawDateTime);
+    }
+
     if (isNaN(appointmentDate.getTime())) {
       return res.status(400).json({ message: 'Invalid appointment date/time.' });
     }
 
-    const appointmentTime = appointmentDate.toTimeString().slice(0, 5);
+    const appointmentTime = `${String(appointmentDate.getUTCHours()).padStart(2, '0')}:${String(appointmentDate.getUTCMinutes()).padStart(2, '0')}`;
 
-    // Availability check
+    // FIX: Changed from 1-hour to 2-hour minimum gap between appointments.
+    // Build a window covering the whole day using UTC dates so the query
+    // is consistent with how we stored the date above.
     const startOfDay = new Date(appointmentDate);
-    startOfDay.setHours(0, 0, 0, 0);
+    startOfDay.setUTCHours(0, 0, 0, 0);
 
     const endOfDay = new Date(appointmentDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    endOfDay.setUTCHours(23, 59, 59, 999);
 
     const existingAppointments = await InPersonOrder.find({
       date: { $gte: startOfDay, $lte: endOfDay },
@@ -47,15 +70,21 @@ export const createOrder = async (req, res) => {
 
     for (const existing of existingAppointments) {
       const existingDateTime = new Date(existing.date);
+
+      // Reconstruct the existing appointment's exact moment from its stored UTC date
+      // and its stored time string (HH:MM) — both are in UTC.
       const [h, m] = existing.time.split(':').map(Number);
-      existingDateTime.setHours(h, m, 0, 0);
+      existingDateTime.setUTCHours(h, m, 0, 0);
 
       const diffMinutes =
         Math.abs(existingDateTime.getTime() - appointmentDate.getTime()) / 60000;
 
-      if (diffMinutes < 60) {
+      // FIX: 120 minutes (2 hours) minimum gap instead of 60
+      if (diffMinutes < 120) {
+        const blockedHour = existingDateTime.getUTCHours();
+        const blockedMin  = String(existingDateTime.getUTCMinutes()).padStart(2, '0');
         return res.status(409).json({
-          message: 'Appointments must be at least 1 hour apart.',
+          message: `Appointments must be at least 2 hours apart. The slot at ${blockedHour}:${blockedMin} is already booked — please choose a time at least 2 hours before or after it.`,
         });
       }
     }
@@ -81,7 +110,7 @@ export const createOrder = async (req, res) => {
         await Notification.create({
           user: populatedOrder.user._id,
           title: 'New Appointment Booked',
-          message: `Your appointment is scheduled for ${populatedOrder.date.toLocaleDateString()} at ${populatedOrder.time}.`,
+          message: `Your appointment is scheduled for ${formatDateForEmail(populatedOrder.date)} at ${populatedOrder.time}.`,
         });
       }
 
@@ -99,7 +128,7 @@ export const createOrder = async (req, res) => {
           html: `
             <h2>Appointment Confirmation</h2>
             <ul>
-              <li>Date: ${populatedOrder.date.toLocaleDateString()}</li>
+              <li>Date: ${formatDateForEmail(populatedOrder.date)}</li>
               <li>Time: ${populatedOrder.time}</li>
               <li>Address: ${populatedOrder.address}</li>
               <li>Phone: ${populatedOrder.phone}</li>
@@ -111,7 +140,6 @@ export const createOrder = async (req, res) => {
       console.warn('Post-create task failed:', sideEffectError.message);
     }
 
-    // ✅ ALWAYS RETURN SUCCESS IF ORDER IS CREATED
     return res.status(201).json({
       message: 'Appointment created successfully.',
       order: populatedOrder,
@@ -126,6 +154,18 @@ export const createOrder = async (req, res) => {
   }
 };
 
+/**
+ * Format a UTC date for email display.
+ * Uses UTC date parts so the date shown in emails matches what the user booked.
+ */
+const formatDateForEmail = (date) => {
+  const d = new Date(date);
+  const year  = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day   = String(d.getUTCDate()).padStart(2, '0');
+  return `${month}/${day}/${year}`;
+};
+
 
 /* ===============================
    USER ORDERS
@@ -136,13 +176,12 @@ export const getUserOrders = async (req, res) => {
     const { page = 1, limit = 10, status, searchTerm } = req.query;
 
     const filter = { user: userId };
-
     if (status && status !== 'All') filter.status = status;
 
     if (searchTerm) {
       filter.$or = [
-        { name: { $regex: searchTerm, $options: 'i' } },
-        { phone: { $regex: searchTerm, $options: 'i' } },
+        { name:    { $regex: searchTerm, $options: 'i' } },
+        { phone:   { $regex: searchTerm, $options: 'i' } },
         { address: { $regex: searchTerm, $options: 'i' } },
       ];
     }
@@ -197,13 +236,12 @@ export const getAllOrders = async (req, res) => {
     const { page = 1, limit = 10, status, searchTerm } = req.query;
 
     const filter = {};
-
     if (status && status !== 'All') filter.status = status;
 
     if (searchTerm) {
       filter.$or = [
-        { name: { $regex: searchTerm, $options: 'i' } },
-        { phone: { $regex: searchTerm, $options: 'i' } },
+        { name:    { $regex: searchTerm, $options: 'i' } },
+        { phone:   { $regex: searchTerm, $options: 'i' } },
         { address: { $regex: searchTerm, $options: 'i' } },
       ];
     }
@@ -302,7 +340,7 @@ export const sendManualReminder = async (req, res) => {
       subject: 'Appointment Reminder',
       html: `
         <p>Reminder for your appointment:</p>
-        <p>${order.date.toLocaleDateString()} at ${order.time}</p>
+        <p>${formatDateForEmail(order.date)} at ${order.time}</p>
       `,
     });
 

@@ -4,16 +4,15 @@ import User from '../models/user.js';
 import Notification from '../models/notification.js';
 import cloudinary from '../utils/cloudinary.js';
 import { sendEmail } from '../utils/email.js';
-import { scheduleOrderNotifications, cancelOrderNotifications } from '../utils/notificationScheduler.js'; // NEW IMPORT
+import { scheduleOrderNotifications, cancelOrderNotifications } from '../utils/notificationScheduler.js';
 import axios from 'axios';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL; // Ensure this is set in your .env
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
-// Helper to format order for frontend display (especially for admin view)
 const formatOrderForAdminFrontend = (order) => {
     return {
         _id: order._id,
@@ -32,7 +31,7 @@ const formatOrderForAdminFrontend = (order) => {
         paymentReference: order.paymentReference,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
-        expectedDeliveryDate: order.expectedDeliveryDate, // NEW
+        expectedDeliveryDate: order.expectedDeliveryDate,
     };
 };
 
@@ -44,7 +43,7 @@ export const createOrder = async (req, res) => {
             material,
             measurements,
             notes,
-            orderType = 'Online', // Default to 'Online' if not provided
+            orderType = 'Online',
         } = req.body;
 
         if (!style || !material) {
@@ -73,29 +72,21 @@ export const createOrder = async (req, res) => {
         let styleImageUrl = cleanStyle.image;
         if (cleanStyle.image && typeof cleanStyle.image === 'string' && cleanStyle.image.startsWith('data:image')) {
             try {
-                const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, {
-                    folder: 'orders/styles',
-                });
+                const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, { folder: 'orders/styles' });
                 styleImageUrl = uploadedStyle.secure_url;
             } catch (uploadError) {
                 return res.status(500).json({ message: "Failed to upload style image." });
             }
-        } else if (!cleanStyle.image) {
-            return res.status(400).json({ message: 'Style image is required.' });
         }
 
         let materialImageUrl = cleanMaterial.image;
         if (cleanMaterial.image && typeof cleanMaterial.image === 'string' && cleanMaterial.image.startsWith('data:image')) {
             try {
-                const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, {
-                    folder: 'orders/materials',
-                });
+                const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, { folder: 'orders/materials' });
                 materialImageUrl = uploadedMaterial.secure_url;
             } catch (uploadError) {
                 return res.status(500).json({ message: "Failed to upload material image." });
             }
-        } else if (!cleanMaterial.image) {
-            return res.status(400).json({ message: 'Material image is required.' });
         }
 
         const user = await User.findById(userId);
@@ -103,7 +94,6 @@ export const createOrder = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        const cleanedMeasurements = typeof measurements === 'string' ? measurements.trim() : '';
         const calculatedTotalPrice = cleanStyle.price + (cleanMaterial.pricePerYard * cleanStyle.yardsRequired);
 
         const newOrder = new Order({
@@ -111,34 +101,25 @@ export const createOrder = async (req, res) => {
             customerName: user.name,
             customerEmail: user.email,
             orderType: orderType,
-            style: {
-                ...cleanStyle,
-                image: styleImageUrl
-            },
-            material: {
-                ...cleanMaterial,
-                image: materialImageUrl
-            },
-            measurements: cleanedMeasurements,
+            style: { ...cleanStyle, image: styleImageUrl },
+            material: { ...cleanMaterial, image: materialImageUrl },
+            measurements: measurements,
             notes: notes || '',
-            status: 'pending', // Default status for new orders
-            paymentStatus: 'unpaid', // Default payment status
+            status: 'pending',
+            paymentStatus: 'unpaid',
             totalPrice: calculatedTotalPrice,
-            // expectedDeliveryDate will be set in scheduleOrderNotifications if order is paid
         });
 
         await newOrder.save();
 
-        // Initial notification to user about order creation and pending payment
         await Notification.create({
             user: userId,
-            order: newOrder._id, // Link notification to order
+            order: newOrder._id,
             title: 'Order Created, Payment Pending',
             message: `Your order for ${newOrder.style.title} has been created, but payment is pending. Please complete payment from your order history.`,
-            type: 'order_status', // Add a type for better filtering
+            type: 'order_status',
         });
 
-        // Email admin about new order (even if unpaid, they should know)
         try {
             await sendEmail({
                 to: ADMIN_EMAIL,
@@ -155,7 +136,7 @@ export const createOrder = async (req, res) => {
                 `,
             });
         } catch (emailError) {
-            console.error('Error sending admin email for new unpaid order:', emailError);
+            console.error('Error sending admin email:', emailError);
         }
 
         res.status(201).json({
@@ -167,10 +148,7 @@ export const createOrder = async (req, res) => {
         console.error('Order creation error caught in controller:', err);
         if (err.name === 'ValidationError') {
             const errors = Object.values(err.errors).map(error => error.message);
-            return res.status(400).json({
-                message: 'Validation failed',
-                errors
-            });
+            return res.status(400).json({ message: 'Validation failed', errors });
         }
         res.status(500).json({ message: 'Failed to create order' });
     }
@@ -201,11 +179,8 @@ export const payForOrder = async (req, res) => {
 
         try {
             const paystackResponse = await axios.get(
-                `https://api.paystack.co/transaction/verify/${reference}`, {
-                    headers: {
-                        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-                    },
-                }
+                `https://api.paystack.co/transaction/verify/${reference}`,
+                { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
             );
 
             paymentGatewayResponse = paystackResponse.data;
@@ -216,17 +191,12 @@ export const payForOrder = async (req, res) => {
                     paymentSuccessful = true;
                 } else {
                     console.warn(`Amount mismatch for order ${orderId}. Expected ${order.totalPrice}, paid ${amountPaid}`);
-                    paymentSuccessful = false;
                     paymentGatewayResponse.message = 'Payment successful, but amount mismatch. Contact support.';
                 }
-            } else {
-                paymentSuccessful = false;
             }
-
         } catch (paymentError) {
-            console.error('Error verifying Paystack transaction:', paymentError.response ? paymentError.response.data : paymentError.message);
-            paymentSuccessful = false;
-            paymentGatewayResponse = paymentError.response ? paymentError.response.data : { message: 'Failed to verify payment with Paystack.' };
+            console.error('Error verifying Paystack transaction:', paymentError.response?.data || paymentError.message);
+            paymentGatewayResponse = paymentError.response?.data || { message: 'Failed to verify payment with Paystack.' };
         }
 
         if (paymentSuccessful) {
@@ -234,22 +204,20 @@ export const payForOrder = async (req, res) => {
             order.paymentReference = reference;
             order.paymentMethod = 'Paystack';
             order.paymentDetails = paymentGatewayResponse.data;
-            order.status = 'in-progress'; // Set status to in-progress once paid
-
+            order.status = 'in-progress';
             await order.save();
 
             const user = await User.findById(userId);
 
             await Notification.create({
                 user: userId,
-                order: order._id, // Link notification to order
+                order: order._id,
                 title: 'Payment Successful!',
                 message: `Your payment for order ${order.style.title} was successful. Your order is now being processed.`,
                 type: 'payment_success',
             });
 
-            // --- NEW: Schedule notifications only after successful payment ---
-            if (order.orderType === 'Online') { // Ensure it's an online order for these notifications
+            if (order.orderType === 'Online') {
                 await scheduleOrderNotifications(order);
             }
 
@@ -261,14 +229,13 @@ export const payForOrder = async (req, res) => {
                         html: `
                             <h2>Payment Successful!</h2>
                             <p>Dear ${user.name},</p>
-                            <p>Great news! Your payment for order <strong>${order.style.title}</strong> (Order ID: ${order._id}) of ₦${order.totalPrice.toLocaleString()} has been successfully received via Paystack.</p>
-                            <p>Your order is now confirmed and will be processed shortly. We've set your expected delivery date to <strong>${order.expectedDeliveryDate.toLocaleDateString()}</strong>.</p>
-                            <p>Thank you for your business!</p>
+                            <p>Your payment for order <strong>${order.style.title}</strong> (Order ID: ${order._id}) of ₦${order.totalPrice.toLocaleString()} has been received.</p>
+                            <p>Expected delivery date: <strong>${order.expectedDeliveryDate ? order.expectedDeliveryDate.toLocaleDateString() : 'To be determined'}</strong>.</p>
                             <p>Transaction Reference: ${reference}</p>
                         `,
                     });
                 } catch (emailError) {
-                    console.error('Error sending payment success email to user:', emailError);
+                    console.error('Error sending success email:', emailError);
                 }
             }
 
@@ -277,20 +244,16 @@ export const payForOrder = async (req, res) => {
                     to: ADMIN_EMAIL,
                     subject: `Order NOW PAID: ${order._id}`,
                     html: `
-                        <h2>New Order NOW PAID!</h2>
+                        <h2>Order NOW PAID!</h2>
                         <p>Order ID: ${order._id}</p>
                         <p>Customer: ${order.customerName} (${order.customerEmail})</p>
                         <p>Item: ${order.style.title}</p>
                         <p>Total: ₦${order.totalPrice.toLocaleString()}</p>
-                        <p>Payment Status: PAID</p>
-                        <p>Payment Method: Paystack</p>
                         <p>Payment Reference: ${reference}</p>
-                        <p>This order was previously unpaid/failed and has now been successfully paid by the user.</p>
-                        <p>Expected Delivery Date: <strong>${order.expectedDeliveryDate.toLocaleDateString()}</strong></p>
                     `,
                 });
             } catch (emailError) {
-                console.error('Error sending admin email for newly paid order:', emailError);
+                console.error('Error sending admin paid email:', emailError);
             }
 
             res.status(200).json({ message: 'Payment successful, order updated.', order });
@@ -303,13 +266,16 @@ export const payForOrder = async (req, res) => {
 
             await Notification.create({
                 user: userId,
-                order: order._id, // Link notification to order
+                order: order._id,
                 title: 'Payment Failed',
                 message: `Payment for your order ${order.style.title} failed. Please try again.`,
                 type: 'payment_failed',
             });
 
-            return res.status(402).json({ message: `Payment failed: ${paymentGatewayResponse.message || 'Verification failed.'}`, error: paymentGatewayResponse });
+            return res.status(402).json({
+                message: `Payment failed: ${paymentGatewayResponse?.message || 'Verification failed.'}`,
+                error: paymentGatewayResponse
+            });
         }
 
     } catch (err) {
@@ -321,18 +287,11 @@ export const payForOrder = async (req, res) => {
     }
 };
 
-// --- User-specific Order Functions ---
-
 export const getUserOrders = async (req, res) => {
     try {
         const userId = req.user.id;
-        // Populate user for potential future use in the formatOrderForAdminFrontend helper
-        // or if you want to expand what's returned to the user.
         const orders = await Order.find({ user: userId }).sort({ createdAt: -1 });
-        res.status(200).json({
-            message: 'User orders retrieved successfully',
-            orders
-        });
+        res.status(200).json({ message: 'User orders retrieved successfully', orders });
     } catch (err) {
         console.error('Error fetching user orders:', err);
         res.status(500).json({ message: 'Failed to fetch user orders' });
@@ -344,17 +303,13 @@ export const getOrderById = async (req, res) => {
         const { orderId } = req.params;
         const userId = req.user.id;
 
-        const order = await Order.findOne({ _id: orderId, user: userId })
-            .populate('user', 'name email');
+        const order = await Order.findOne({ _id: orderId, user: userId }).populate('user', 'name email');
 
         if (!order) {
             return res.status(404).json({ message: 'Order not found or you do not have access to it.' });
         }
 
-        res.status(200).json({
-            message: 'Order retrieved successfully',
-            order
-        });
+        res.status(200).json({ message: 'Order retrieved successfully', order });
 
     } catch (err) {
         console.error('Error fetching single order:', err);
@@ -369,33 +324,86 @@ export const updateOrder = async (req, res) => {
     try {
         const { orderId } = req.params;
         const userId = req.user.id;
-        const updates = req.body;
 
-        const order = await Order.findOneAndUpdate(
-            { _id: orderId, user: userId },
-            { $set: updates },
+        // Fetch the existing order first so we can return it alongside the updated version
+        const existingOrder = await Order.findOne({ _id: orderId, user: userId });
+
+        if (!existingOrder) {
+            return res.status(404).json({ message: 'Order not found or access denied.' });
+        }
+
+        // Log existing state to the server terminal before applying changes
+        console.log(`[updateOrder] Order ${orderId} BEFORE update:`, JSON.stringify({
+            style: existingOrder.style,
+            material: existingOrder.material,
+            measurements: existingOrder.measurements,
+            notes: existingOrder.notes,
+            status: existingOrder.status,
+            paymentStatus: existingOrder.paymentStatus,
+        }, null, 2));
+
+        // Only allow fields the user is permitted to change.
+        // Status and paymentStatus are intentionally excluded — those are
+        // controlled by the payment flow and admin actions only.
+        const { style, material, measurements, notes, paymentChannel } = req.body;
+        const allowedUpdates = {};
+
+        if (notes !== undefined) allowedUpdates.notes = notes;
+        if (paymentChannel !== undefined) allowedUpdates.paymentChannel = paymentChannel;
+        if (measurements !== undefined) allowedUpdates.measurements = measurements;
+
+        // FIX: flatten nested objects into dot-notation keys so $set patches
+        // individual subdocument fields instead of replacing the whole object.
+        // Without this, sending { style: { title: 'X' } } would wipe out
+        // style.image, style.price, etc. entirely.
+        if (style && typeof style === 'object') {
+            for (const [key, value] of Object.entries(style)) {
+                allowedUpdates[`style.${key}`] = value;
+            }
+        }
+
+        if (material && typeof material === 'object') {
+            for (const [key, value] of Object.entries(material)) {
+                allowedUpdates[`material.${key}`] = value;
+            }
+        }
+
+        const updatedOrder = await Order.findByIdAndUpdate(
+            orderId,
+            { $set: allowedUpdates },
             { new: true, runValidators: true }
         );
 
-        if (!order) {
-            return res.status(404).json({ message: 'Order not found or you do not have access to it.' });
-        }
+        console.log(`[updateOrder] Order ${orderId} AFTER update:`, JSON.stringify({
+            style: updatedOrder.style,
+            material: updatedOrder.material,
+            measurements: updatedOrder.measurements,
+            notes: updatedOrder.notes,
+        }, null, 2));
 
         res.status(200).json({
             message: 'Order updated successfully',
-            order
+            // Return the previous state so the frontend can show a before/after diff
+            previousData: {
+                style: existingOrder.style,
+                material: existingOrder.material,
+                measurements: existingOrder.measurements,
+                notes: existingOrder.notes,
+                totalPrice: existingOrder.totalPrice,
+            },
+            order: updatedOrder,
         });
 
     } catch (err) {
-        console.error('Error updating order:', err);
+        console.error('Update Error:', err.message);
         if (err.name === 'ValidationError') {
-            const errors = Object.values(err.errors).map(error => error.message);
-            return res.status(400).json({
-                message: 'Validation failed',
-                errors
-            });
+            const errors = Object.values(err.errors).map(e => e.message);
+            return res.status(400).json({ message: 'Validation failed', errors });
         }
-        res.status(500).json({ message: 'Failed to update order' });
+        if (err.name === 'CastError') {
+            return res.status(400).json({ message: 'Invalid order ID format.' });
+        }
+        res.status(400).json({ message: 'Update failed', reason: err.message });
     }
 };
 
@@ -414,39 +422,29 @@ export const deleteOrder = async (req, res) => {
             return res.status(404).json({ message: 'Order not found or you do not have access to it.' });
         }
 
-        // --- NEW: Cancel pending notifications if order is cancelled ---
         cancelOrderNotifications(orderId);
 
-        // Send notification to user
         await Notification.create({
             user: userId,
-            order: order._id, // Link notification to order
+            order: order._id,
             title: 'Order Cancelled',
-            message: `Your order ${order.style.title} (ID: ${order._id.substring(0, 8)}...) has been cancelled.`,
+            message: `Your order ${order.style.title} has been cancelled.`,
             type: 'order_status',
         });
 
         res.status(200).json({ message: 'Order cancelled successfully', order });
 
     } catch (err) {
-        console.error('Error deleting/cancelling order:', err);
-        if (err.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid order ID format.' });
-        }
+        console.error('Error deleting order:', err);
         res.status(500).json({ message: 'Failed to cancel order' });
     }
 };
-
-// --- Admin-specific Order Functions ---
 
 export const getAdminOrders = async (req, res) => {
     try {
         const orders = await Order.find().populate('user', 'name email').sort({ createdAt: -1 });
         const formattedOrders = orders.map(formatOrderForAdminFrontend);
-        res.status(200).json({
-            message: 'All orders retrieved successfully for admin',
-            orders: formattedOrders
-        });
+        res.status(200).json({ message: 'All orders retrieved successfully for admin', orders: formattedOrders });
     } catch (err) {
         console.error('Error fetching admin orders:', err);
         res.status(500).json({ message: 'Failed to fetch all orders' });
@@ -461,15 +459,13 @@ export const getAdminOrderById = async (req, res) => {
         if (!order) {
             return res.status(404).json({ message: 'Order not found' });
         }
+
         res.status(200).json({
             message: 'Order retrieved successfully for admin',
             order: formatOrderForAdminFrontend(order)
         });
     } catch (err) {
         console.error('Error fetching admin single order:', err);
-        if (err.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid order ID format.' });
-        }
         res.status(500).json({ message: 'Failed to fetch order' });
     }
 };
@@ -479,96 +475,96 @@ export const updateOrderAdmin = async (req, res) => {
         const { id } = req.params;
         const updates = req.body;
 
-        const order = await Order.findById(id).populate('user', 'name email');
-
-        if (!order) {
+        const existingOrder = await Order.findById(id);
+        if (!existingOrder) {
             return res.status(404).json({ message: 'Order not found' });
         }
 
-        // Capture original status for comparison
-        const originalStatus = order.status;
-        const originalPaymentStatus = order.paymentStatus;
+        const originalStatus = existingOrder.status;
+        const originalPaymentStatus = existingOrder.paymentStatus;
 
-        // Apply updates
-        Object.keys(updates).forEach(key => {
-            order[key] = updates[key];
-        });
-
-        await order.save();
-
-        // Send notification to user if status or paymentStatus changes
-        if (updates.status && originalStatus !== updates.status) { // Check if status actually changed
-            await Notification.create({
-                user: order.user._id,
-                order: order._id, // Link notification to order
-                title: `Order Status Updated: ${updates.status.toUpperCase()}`,
-                message: `Your order for ${order.style?.title || 'your item'} (ID: ${order._id.substring(0, 8)}...) has been updated to '${updates.status}'.`,
-                type: 'order_status',
-            });
-            // If the status is 'completed' and payment is paid, notify user of completion
-            if (updates.status === 'completed' && order.paymentStatus === 'paid' && order.user?.email) {
-                await sendEmail({
-                    to: order.user.email,
-                    subject: 'Your Order Has Been Completed!',
-                    html: `
-                        <h2>Order Completed!</h2>
-                        <p>Dear ${order.user.name},</p>
-                        <p>Great news! Your order <strong>${order.style?.title || 'your item'}</strong> (Order ID: ${order._id}) has been completed and is ready for collection/delivery.</p>
-                        <p>Thank you for your business!</p>
-                    `,
-                });
+        const flatUpdates = {};
+        for (const [key, value] of Object.entries(updates)) {
+            if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+                for (const [subKey, subValue] of Object.entries(value)) {
+                    flatUpdates[`${key}.${subKey}`] = subValue;
+                }
+            } else {
+                flatUpdates[key] = value;
             }
         }
 
-        if (updates.paymentStatus && originalPaymentStatus !== updates.paymentStatus) { // Check if paymentStatus actually changed
-            await Notification.create({
-                user: order.user._id,
-                order: order._id, // Link notification to order
-                title: `Payment Status Updated: ${updates.paymentStatus.toUpperCase()}`,
-                message: `The payment status for your order ${order.style?.title || 'your item'} (ID: ${order._id.substring(0, 8)}...) has been updated to '${updates.paymentStatus}'.`,
-                type: 'payment_status_update',
-            });
-            if (updates.paymentStatus === 'paid' && order.user?.email) {
-                await sendEmail({
-                    to: order.user.email,
-                    subject: 'Your Order Payment Has Been Marked As Paid!',
-                    html: `
-                        <h2>Payment Confirmed!</h2>
-                        <p>Dear ${order.user.name},</p>
-                        <p>Your payment for order <strong>${order.style?.title || 'your item'}</strong> (Order ID: ${order._id}) has now been confirmed and marked as PAID by our team.</p>
-                        <p>Your order will now proceed with processing.</p>
-                        <p>Thank you for your business!</p>
-                    `,
-                });
+        const updatedOrder = await Order.findByIdAndUpdate(
+            id,
+            { $set: flatUpdates },
+            { new: true, runValidators: true }
+        ).populate('user', 'name email');
 
-                // If admin marks as paid, and it's an online order, schedule notifications
-                if (order.orderType === 'Online' && originalPaymentStatus !== 'paid') {
-                     await scheduleOrderNotifications(order);
+        if (!updatedOrder) {
+            return res.status(404).json({ message: 'Order not found after update' });
+        }
+
+        if (updates.status && originalStatus !== updates.status) {
+            if (updatedOrder.user?._id) {
+                await Notification.create({
+                    user: updatedOrder.user._id,
+                    order: updatedOrder._id,
+                    title: `Order Status Updated: ${updates.status.toUpperCase()}`,
+                    message: `Your order for ${updatedOrder.style?.title || 'your item'} has been updated to '${updates.status}'.`,
+                    type: 'order_status',
+                });
+            }
+
+            if (updates.status === 'completed' && updatedOrder.paymentStatus === 'paid' && updatedOrder.user?.email) {
+                try {
+                    await sendEmail({
+                        to: updatedOrder.user.email,
+                        subject: 'Your Order Has Been Completed!',
+                        html: `<h2>Order Completed!</h2><p>Dear ${updatedOrder.user.name}, your order is ready!</p>`,
+                    });
+                } catch (emailError) {
+                    console.error('Error sending order completed email:', emailError);
+                }
+            }
+        }
+
+        if (updates.paymentStatus && originalPaymentStatus !== updates.paymentStatus) {
+            if (updatedOrder.user?._id) {
+                await Notification.create({
+                    user: updatedOrder.user._id,
+                    order: updatedOrder._id,
+                    title: `Payment Status Updated: ${updates.paymentStatus.toUpperCase()}`,
+                    message: `Payment for ${updatedOrder.style?.title || 'item'} updated to '${updates.paymentStatus}'.`,
+                    type: 'payment_status_update',
+                });
+            }
+
+            if (updates.paymentStatus === 'paid' && updatedOrder.user?.email) {
+                try {
+                    await sendEmail({
+                        to: updatedOrder.user.email,
+                        subject: 'Your Order Payment Has Been Confirmed!',
+                        html: `<h2>Payment Confirmed!</h2><p>Dear ${updatedOrder.user.name}, your payment was confirmed.</p>`,
+                    });
+                } catch (emailError) {
+                    console.error('Error sending payment email:', emailError);
+                }
+
+                if (updatedOrder.orderType === 'Online' && originalPaymentStatus !== 'paid') {
+                    await scheduleOrderNotifications(updatedOrder);
                 }
             } else if (updates.paymentStatus !== 'paid' && originalPaymentStatus === 'paid') {
-                // If payment status changes from paid to something else (e.g., refunded, failed)
-                // You might want to cancel active schedules
-                cancelOrderNotifications(order._id.toString());
+                cancelOrderNotifications(updatedOrder._id.toString());
             }
         }
 
         res.status(200).json({
             message: 'Order updated successfully by admin',
-            order: formatOrderForAdminFrontend(order)
+            order: formatOrderForAdminFrontend(updatedOrder)
         });
 
     } catch (err) {
         console.error('Error updating order by admin:', err);
-        if (err.name === 'ValidationError') {
-            const errors = Object.values(err.errors).map(error => error.message);
-            return res.status(400).json({
-                message: 'Validation failed',
-                errors
-            });
-        }
-        if (err.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid order ID format.' });
-        }
         res.status(500).json({ message: 'Failed to update order' });
     }
 };
@@ -582,16 +578,14 @@ export const deleteOrderAdmin = async (req, res) => {
             return res.status(404).json({ message: 'Order not found' });
         }
 
-        // --- NEW: Cancel pending notifications if order is permanently deleted by admin ---
         cancelOrderNotifications(id);
 
-        // You might want to notify the user if their order was deleted by admin
         if (order.user) {
             await Notification.create({
                 user: order.user,
-                order: order._id, // Link notification to order
+                order: order._id,
                 title: 'Order Permanently Deleted',
-                message: `Your order ${order.style?.title || 'your item'} (ID: ${order._id.substring(0, 8)}...) has been permanently deleted by an administrator. Please contact support for more details.`,
+                message: `Your order ${order.style?.title || 'your item'} has been permanently deleted.`,
                 type: 'order_status',
             });
         }
@@ -600,9 +594,6 @@ export const deleteOrderAdmin = async (req, res) => {
 
     } catch (err) {
         console.error('Error deleting order by admin:', err);
-        if (err.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid order ID format.' });
-        }
         res.status(500).json({ message: 'Failed to delete order' });
     }
 };
