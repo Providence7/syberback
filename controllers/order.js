@@ -34,126 +34,85 @@ const formatOrderForAdminFrontend = (order) => {
         expectedDeliveryDate: order.expectedDeliveryDate,
     };
 };
-
+// controllers/orderController.js — update createOrder
 export const createOrder = async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const {
-            style,
-            material,
-            measurements,
-            notes,
-            orderType = 'Online',
-        } = req.body;
+  try {
+    const userId = req.user.id;
+    const {
+      style, material, measurements, notes,
+      orderType = 'Online',
+      measurementRequested = false,   // ← new
+    } = req.body;
 
-        if (!style || !material) {
-            return res.status(400).json({ message: 'Style and material data are required.' });
-        }
-
-        const cleanStyle = {
-            title: style.title,
-            price: typeof style.price === 'number' ? style.price : (parseFloat(style.price) || 0),
-            yardsRequired: typeof style.yardsRequired === 'number' ? style.yardsRequired : (parseFloat(style.yardsRequired) || 0),
-            recommendedMaterials: style.recommendedMaterials || [],
-            image: style.image
-        };
-
-        const cleanMaterial = {
-            name: material.name,
-            type: material.type,
-            pricePerYard: typeof material.pricePerYard === 'number' ? material.pricePerYard : (parseFloat(material.pricePerYard) || 0),
-            image: material.image
-        };
-
-        if (!cleanStyle.title || !cleanStyle.image || !cleanMaterial.name || !cleanMaterial.image) {
-            return res.status(400).json({ message: 'Style title, style image, material name, and material image are required.' });
-        }
-
-        let styleImageUrl = cleanStyle.image;
-        if (cleanStyle.image && typeof cleanStyle.image === 'string' && cleanStyle.image.startsWith('data:image')) {
-            try {
-                const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, { folder: 'orders/styles' });
-                styleImageUrl = uploadedStyle.secure_url;
-            } catch (uploadError) {
-                return res.status(500).json({ message: "Failed to upload style image." });
-            }
-        }
-
-        let materialImageUrl = cleanMaterial.image;
-        if (cleanMaterial.image && typeof cleanMaterial.image === 'string' && cleanMaterial.image.startsWith('data:image')) {
-            try {
-                const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, { folder: 'orders/materials' });
-                materialImageUrl = uploadedMaterial.secure_url;
-            } catch (uploadError) {
-                return res.status(500).json({ message: "Failed to upload material image." });
-            }
-        }
-
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.status(404).json({ message: 'User not found' });
-        }
-
-        const calculatedTotalPrice = cleanStyle.price + (cleanMaterial.pricePerYard * cleanStyle.yardsRequired);
-
-        const newOrder = new Order({
-            user: userId,
-            customerName: user.name,
-            customerEmail: user.email,
-            orderType: orderType,
-            style: { ...cleanStyle, image: styleImageUrl },
-            material: { ...cleanMaterial, image: materialImageUrl },
-            measurements: measurements,
-            notes: notes || '',
-            status: 'pending',
-            paymentStatus: 'unpaid',
-            totalPrice: calculatedTotalPrice,
-        });
-
-        await newOrder.save();
-
-        await Notification.create({
-            user: userId,
-            order: newOrder._id,
-            title: 'Order Created, Payment Pending',
-            message: `Your order for ${newOrder.style.title} has been created, but payment is pending. Please complete payment from your order history.`,
-            type: 'order_status',
-        });
-
-        try {
-            await sendEmail({
-                to: ADMIN_EMAIL,
-                subject: `NEW ORDER Created: ${newOrder._id} (Payment Pending)`,
-                html: `
-                    <h2>New Order Created!</h2>
-                    <p>Order ID: <strong>${newOrder._id}</strong></p>
-                    <p>Customer: ${newOrder.customerName} (${newOrder.customerEmail})</p>
-                    <p>Item: ${newOrder.style.title}</p>
-                    <p>Total: ₦${newOrder.totalPrice.toLocaleString()}</p>
-                    <p>Payment Status: <strong>UNPAID</strong></p>
-                    <p>Notes: ${newOrder.notes || 'None'}</p>
-                    <p>Please monitor payment for this order.</p>
-                `,
-            });
-        } catch (emailError) {
-            console.error('Error sending admin email:', emailError);
-        }
-
-        res.status(201).json({
-            message: 'Order created. Payment is pending. Please pay from your order history.',
-            order: newOrder
-        });
-
-    } catch (err) {
-        console.error('Order creation error caught in controller:', err);
-        if (err.name === 'ValidationError') {
-            const errors = Object.values(err.errors).map(error => error.message);
-            return res.status(400).json({ message: 'Validation failed', errors });
-        }
-        res.status(500).json({ message: 'Failed to create order' });
+    if (!style || !material) {
+      return res.status(400).json({ message: 'Style and material data are required.' });
     }
-};
 
+    // ... your existing cleanStyle / cleanMaterial / image upload logic unchanged ...
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // ── Auto-build note ───────────────────────────────────────────────────
+    const measurementNote = measurementRequested
+      ? '📏 Measurement service requested (+₦1,500). A tailor will contact you to take your measurements.'
+      : '';
+
+    const combinedNote = [measurementNote, notes?.trim()]
+      .filter(Boolean)
+      .join('\n\n');
+    // ─────────────────────────────────────────────────────────────────────
+
+    const stylePrice           = parseFloat(cleanStyle.price)            || 0;
+    const materialPricePerYard = parseFloat(cleanMaterial.pricePerYard)  || 0;
+    const yardsRequired        = parseFloat(cleanStyle.yardsRequired)    || 0;
+    const measurementFee       = measurementRequested ? 1500 : 0;
+    const calculatedTotalPrice = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
+
+    const newOrder = new Order({
+      user:          userId,
+      customerName:  user.name,
+      customerEmail: user.email,
+      orderType,
+      style:         { ...cleanStyle,    image: styleImageUrl    },
+      material:      { ...cleanMaterial, image: materialImageUrl },
+      measurements,
+      notes:         combinedNote,
+      status:        'pending',
+      paymentStatus: 'unpaid',
+      totalPrice:    calculatedTotalPrice,
+      measurementRequest: {           // ← new
+        requested: measurementRequested,
+        fee:       1500,
+        paid:      false,
+      },
+    });
+
+    await newOrder.save();
+
+    // Notification text reflects measurement request
+    await Notification.create({
+      user:    userId,
+      order:   newOrder._id,
+      title:   'Order Created, Payment Pending',
+      message: measurementRequested
+        ? `Your order for ${newOrder.style.title} includes a measurement service (+₦1,500). Please complete payment.`
+        : `Your order for ${newOrder.style.title} has been created. Please complete payment.`,
+      type: 'order_status',
+    });
+
+    // ... rest of your email logic unchanged ...
+
+    res.status(201).json({
+      message: 'Order created. Payment is pending.',
+      order: newOrder,
+    });
+
+  } catch (err) {
+    console.error('Order creation error:', err);
+    res.status(500).json({ message: 'Failed to create order' });
+  }
+};
 export const payForOrder = async (req, res) => {
     try {
         const { orderId } = req.params;

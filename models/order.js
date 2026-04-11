@@ -53,6 +53,12 @@ const orderSchema = new mongoose.Schema({
   measurements: {
     type: mongoose.Schema.Types.Mixed,
   },
+  // models/Order.js — add inside orderSchema, after the measurements field
+measurementRequest: {
+  requested: { type: Boolean, default: false },
+  fee:        { type: Number,  default: 1500  },
+  paid:       { type: Boolean, default: false },
+},
   notes: {
     type: String,
     default: '',
@@ -89,7 +95,6 @@ const orderSchema = new mongoose.Schema({
     sparse: true,
   },
 }, { timestamps: true });
-
 orderSchema.pre('save', async function(next) {
   if (this.isNew && this.user && (!this.customerName || !this.customerEmail)) {
     try {
@@ -104,18 +109,21 @@ orderSchema.pre('save', async function(next) {
     }
   }
 
-  if (this.isNew || this.isModified('style') || this.isModified('material')) {
-    let calculatedTotalPrice = 0;
+  if (
+    this.isNew ||
+    this.isModified('style') ||
+    this.isModified('material') ||
+    this.isModified('measurementRequest')   // ← recalculate when toggled
+  ) {
+    const stylePrice           = parseFloat(this.style?.price)            || 0;
+    const materialPricePerYard = parseFloat(this.material?.pricePerYard)  || 0;
+    const yardsRequired        = parseFloat(this.style?.yardsRequired)    || 0;
+    const measurementFee       = this.measurementRequest?.requested
+                                   ? (this.measurementRequest.fee || 1500)
+                                   : 0;
 
-    if (this.style && this.material) {
-      const stylePrice = parseFloat(this.style.price) || 0;
-      const materialPricePerYard = parseFloat(this.material.pricePerYard) || 0;
-      const yardsRequired = parseFloat(this.style.yardsRequired) || 0;
-
-      calculatedTotalPrice = stylePrice + (materialPricePerYard * yardsRequired);
-    }
-
-    this.totalPrice = isNaN(calculatedTotalPrice) ? 0 : calculatedTotalPrice;
+    const total = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
+    this.totalPrice = isNaN(total) ? 0 : total;
   }
 
   next();
