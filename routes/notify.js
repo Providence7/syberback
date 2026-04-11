@@ -1,21 +1,18 @@
+// routes/notify.js
 import express from 'express';
 import { protect } from '../middlewares/authMiddleware.js';
 import {
   getNotifications,
   markAllAsRead,
-  markNotificationAsRead
+  markNotificationAsRead,
+  adminSendNotification,        // ← add this import
 } from '../controllers/notify.js';
 
 const router = express.Router();
 
-// ✅ First, authenticate the user for all routes
-// router.use(protect);
-
-// ✅ Then log after authentication
-
-// ✅ Routes
-router.get('/',protect, getNotifications);
-router.post('/',protect, markAllAsRead);
-router.post('/:id/read',protect, markNotificationAsRead);
+router.get('/',                    protect, getNotifications);
+router.post('/read-all',           protect, markAllAsRead);           // ← was POST '/' — fixed
+router.post('/admin/send',         protect, adminSendNotification);   // ← was missing entirely
+router.post('/:id/read',           protect, markNotificationAsRead);  // ← must stay last (param route)
 
 export default router;
