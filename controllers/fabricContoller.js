@@ -1,6 +1,8 @@
 // src/controllers/fabricController.js (Fixed version)
 import Fabric from '../models/fabric.js';
 import { v2 as cloudinary } from 'cloudinary';
+import { broadcastNotification } from '../utils/notifyUsers.js';
+import User from '../models/user.js';
 
 // Helper to extract public_id from Cloudinary URL (if not stored in DB)
 const getPublicIdFromUrl = (imageUrl) => {
@@ -66,6 +68,18 @@ export const addFabric = async (req, res) => {
         });
 
         const fabric = await newFabric.save();
+        try {
+  const io = req.app.get('io');
+  const users = await User.find({}, '_id');
+  await broadcastNotification(io, users.map(u => u._id), {
+    title:    '🧵 New Material Available',
+    message:  `"${fabric.title}" has been added to our materials catalogue.`,
+    type:     'info',
+    category: 'material',
+  });
+} catch (notifErr) {
+  console.error('Notification error (non-blocking):', notifErr.message);
+}
         res.status(201).json({
             success: true,
             message: 'Fabric added successfully',
@@ -208,6 +222,18 @@ export const updateFabric = async (req, res) => {
         }
 
         const updatedFabric = await fabric.save();
+        try {
+  const io = req.app.get('io');
+  const users = await User.find({}, '_id');
+  await broadcastNotification(io, users.map(u => u._id), {
+    title:    '🧵 Material updated',
+    message:  `"${fabric.title}" has been added to our materials catalogue.`,
+    type:     'info',
+    category: 'material',
+  });
+} catch (notifErr) {
+  console.error('Notification error (non-blocking):', notifErr.message);
+}
         res.json({
             success: true,
             message: 'Fabric updated successfully',

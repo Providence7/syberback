@@ -29,6 +29,35 @@ export const getNotifications = async (req, res) => {
     res.status(500).json({ message: 'Server error while fetching notifications' });
   }
 };
+// In controllers/notification.js — add this export
+
+export const adminSendNotification = async (req, res) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ message: 'Admins only' });
+    }
+
+    const { title, message, type = 'info', scope, userId } = req.body;
+    if (!title?.trim() || !message?.trim()) {
+      return res.status(400).json({ message: 'Title and message are required' });
+    }
+
+    const io = req.app.get('io');
+
+    if (scope === 'targeted') {
+      if (!userId) return res.status(400).json({ message: 'userId required for targeted scope' });
+      await notifyUser(io, userId, { title, message, type, category: 'admin' });
+    } else {
+      // broadcast
+      const users = await User.find({}, '_id');
+      await broadcastNotification(io, users.map(u => u._id), { title, message, type, category: 'admin' });
+    }
+
+    res.status(200).json({ success: true, message: 'Notification sent' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
 
 export const markAllAsRead = async (req, res) => {
   console.log('markAllAsRead called for user:', req.user?.id);

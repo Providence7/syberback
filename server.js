@@ -11,41 +11,24 @@ import styleRoutes from './routes/styleRoutes.js';
 import currencyRoutes from './routes/currency.js';
 import orderRoutes from './routes/order.js';
 import fabricRoutes from './routes/fabricRoutes.js';
+import http from 'http';
+import { initSocket } from './services/socket.js';
 
 dotenv.config();
 const app = express();
 
-// ---------------------------
-// ✅ CORS CONFIG (critical for Safari)
-// ---------------------------
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL, // e.g. https://sybertailor.netlify.app
-    credentials: true, // allow cookies
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  })
-);
+app.use(cors({
+  origin: process.env.CLIENT_URL,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 
-// Handle OPTIONS preflight requests explicitly (important for Safari)
-
-
-// ---------------------------
-// Middleware
-// ---------------------------
 app.use(express.json());
 app.use(cookieParser());
 
-// ---------------------------
-// Basic Route
-// ---------------------------
-app.get('/', (req, res) => {
-  res.send("✅ SyberTailor backend is running!");
-});
+app.get('/', (req, res) => res.send("✅ SyberTailor backend is running!"));
 
-// ---------------------------
-// API Routes
-// ---------------------------
 app.use('/api/auth', authRoutes);
 app.use('/api/measurements', measurementRoutes);
 app.use('/api/order', inpersonRoute);
@@ -55,17 +38,17 @@ app.use('/api/fabrics', fabricRoutes);
 app.use('/api/currency', currencyRoutes);
 app.use('/api/orders', orderRoutes);
 
-// ---------------------------
-// Database
-// ---------------------------
 connectDB();
 
-// ---------------------------
-// Server Start
-// ---------------------------
+const server = http.createServer(app);
+
+// ✅ Store io on app so controllers can access it via req.app.get('io')
+const io = initSocket(server);
+app.set('io', io);
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
   console.log(`CLIENT_URL: ${process.env.CLIENT_URL}`);
   console.log(`NODE_ENV: ${process.env.NODE_ENV}`);
 });

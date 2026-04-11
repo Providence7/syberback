@@ -1,22 +1,36 @@
 import mongoose from 'mongoose';
 
-const measurementSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  photoUrl: String,
-  photoPublicId: String,
-  unit: { type: String, enum: ['in'], default: 'in' },
-  gender: String,
-  // New fields added to the model
-  size: {
-    type: String,
-    // This field stores the determined size (e.g., 'Small', 'Medium', 'Custom')
+const measurementSchema = new mongoose.Schema(
+  {
+    name:           { type: String, required: true },
+    photoUrl:       { type: String },
+    photoPublicId:  { type: String },
+    unit:           { type: String, enum: ['in'], default: 'in' },
+    gender:         { type: String, enum: ['male', 'female'], lowercase: true },
+
+    // Machine-readable size key — used by the order form to look up materialQuantities
+    // e.g. "extraLarge" matches the key in style.materialQuantities
+    size: {
+      type: String,
+      enum: ['kid', 'small', 'medium', 'large', 'extraLarge'],
+      default: 'medium',
+    },
+
+    // Human-readable label shown in the UI
+    sizeLabel: {
+      type: String,
+      enum: ['Kid', 'Small', 'Medium', 'Large', 'Extra Large'],
+      default: 'Medium',
+    },
+
+    age:  { type: String },
+
+    // All raw measurement fields stored as a flexible map
+    data: { type: mongoose.Schema.Types.Mixed },
+
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   },
-  age: {
-    type: String,
-    // This field stores the age bracket as a string
-  },
-  data: mongoose.Schema.Types.Mixed,
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-}, { timestamps: true });
+  { timestamps: true },
+);
 
 export default mongoose.model('Measurement', measurementSchema);
