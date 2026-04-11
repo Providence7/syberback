@@ -5,14 +5,22 @@ import {
   getNotifications,
   markAllAsRead,
   markNotificationAsRead,
-  adminSendNotification,        // ← add this import
+  adminSendNotification,
 } from '../controllers/notify.js';
 
 const router = express.Router();
 
-router.get('/',                    protect, getNotifications);
-router.post('/read-all',           protect, markAllAsRead);           // ← was POST '/' — fixed
-router.post('/admin/send',         protect, adminSendNotification);   // ← was missing entirely
-router.post('/:id/read',           protect, markNotificationAsRead);  // ← must stay last (param route)
+// Inline admin guard — no extra file needed
+const adminOnly = (req, res, next) => {
+  if (!req.user?.isAdmin) {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  next();
+};
+
+router.get('/',              protect,              getNotifications);
+router.post('/read-all',     protect,              markAllAsRead);
+router.post('/admin/send',   protect, adminOnly,   adminSendNotification);  // ← admin only
+router.post('/:id/read',     protect,              markNotificationAsRead);
 
 export default router;

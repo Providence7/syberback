@@ -1,6 +1,9 @@
 // controllers/notification.js
+// controllers/notify.js
 import mongoose from 'mongoose';
 import Notification from '../models/notification.js';
+import User from '../models/user.js';                                    // ← add this
+import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js'; // ← add this
 
 export const getNotifications = async (req, res) => {
  
@@ -32,8 +35,8 @@ export const getNotifications = async (req, res) => {
 // In controllers/notification.js — add this export
 
 export const adminSendNotification = async (req, res) => {
-  try {
-    if (req.user?.role !== 'admin') {
+ try {
+    if (!req.user?.isAdmin) {                          // ← was role !== 'admin'
       return res.status(403).json({ message: 'Admins only' });
     }
 
