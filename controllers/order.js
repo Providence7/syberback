@@ -12,6 +12,7 @@ dotenv.config();
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const MEASUREMENT_FEE = 1500;
 
 const formatOrderForAdminFrontend = (order) => {
     return {
@@ -28,91 +29,164 @@ const formatOrderForAdminFrontend = (order) => {
         style: order.style,
         material: order.material,
         measurements: order.measurements,
+        measurementRequest: order.measurementRequest,   // ← expose to admin
         paymentReference: order.paymentReference,
         createdAt: order.createdAt,
         updatedAt: order.updatedAt,
         expectedDeliveryDate: order.expectedDeliveryDate,
     };
 };
-// controllers/orderController.js — update createOrder
+
 export const createOrder = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const {
-      style, material, measurements, notes,
-      orderType = 'Online',
-      measurementRequested = false,   // ← new
-    } = req.body;
+    try {
+        const userId = req.user.id;
+        const {
+            style,
+            material,
+            measurements,
+            notes,
+            orderType = 'Online',
+            measurementRequested = false,   // ← from frontend toggle
+        } = req.body;
 
-    if (!style || !material) {
-      return res.status(400).json({ message: 'Style and material data are required.' });
+        if (!style || !material) {
+            return res.status(400).json({ message: 'Style and material data are required.' });
+        }
+
+        const cleanStyle = {
+            title: style.title,
+            price: typeof style.price === 'number' ? style.price : (parseFloat(style.price) || 0),
+            yardsRequired: typeof style.yardsRequired === 'number' ? style.yardsRequired : (parseFloat(style.yardsRequired) || 0),
+            recommendedMaterials: style.recommendedMaterials || [],
+            image: style.image
+        };
+
+        const cleanMaterial = {
+            name: material.name,
+            type: material.type,
+            pricePerYard: typeof material.pricePerYard === 'number' ? material.pricePerYard : (parseFloat(material.pricePerYard) || 0),
+            image: material.image
+        };
+
+        if (!cleanStyle.title || !cleanStyle.image || !cleanMaterial.name || !cleanMaterial.image) {
+            return res.status(400).json({ message: 'Style title, style image, material name, and material image are required.' });
+        }
+
+        // ── Image uploads ─────────────────────────────────────────────────────
+        let styleImageUrl = cleanStyle.image;
+        if (cleanStyle.image && typeof cleanStyle.image === 'string' && cleanStyle.image.startsWith('data:image')) {
+            try {
+                const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, { folder: 'orders/styles' });
+                styleImageUrl = uploadedStyle.secure_url;
+            } catch (uploadError) {
+                return res.status(500).json({ message: 'Failed to upload style image.' });
+            }
+        }
+
+        let materialImageUrl = cleanMaterial.image;
+        if (cleanMaterial.image && typeof cleanMaterial.image === 'string' && cleanMaterial.image.startsWith('data:image')) {
+            try {
+                const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, { folder: 'orders/materials' });
+                materialImageUrl = uploadedMaterial.secure_url;
+            } catch (uploadError) {
+                return res.status(500).json({ message: 'Failed to upload material image.' });
+            }
+        }
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // ── Price calculation (includes measurement fee if requested) ─────────
+        const stylePrice           = parseFloat(cleanStyle.price)           || 0;
+        const materialPricePerYard = parseFloat(cleanMaterial.pricePerYard) || 0;
+        const yardsRequired        = parseFloat(cleanStyle.yardsRequired)   || 0;
+        const measurementFee       = measurementRequested ? MEASUREMENT_FEE : 0;
+        const calculatedTotalPrice = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
+
+        // ── Auto-build note ───────────────────────────────────────────────────
+        // The system note is always added when measurement is requested,
+        // even if the user left the notes field empty.
+        const systemNote = measurementRequested
+            ? `📏 [Measurement Service Requested] A tailor will contact this customer to schedule a measurement session. Measurement fee of ₦${MEASUREMENT_FEE.toLocaleString()} has been included in the order total.`
+            : '';
+
+        const userNote = notes?.trim() ? `📝 Customer note: ${notes.trim()}` : '';
+
+        const combinedNote = [systemNote, userNote].filter(Boolean).join('\n\n');
+
+        // ── Create order ──────────────────────────────────────────────────────
+        const newOrder = new Order({
+            user:          userId,
+            customerName:  user.name,
+            customerEmail: user.email,
+            orderType,
+            style:         { ...cleanStyle,    image: styleImageUrl    },
+            material:      { ...cleanMaterial, image: materialImageUrl },
+            measurements:  measurements || null,
+            notes:         combinedNote,
+            status:        'pending',
+            paymentStatus: 'unpaid',
+            totalPrice:    calculatedTotalPrice,
+            measurementRequest: {
+                requested: measurementRequested,
+                fee:       MEASUREMENT_FEE,
+                paid:      false,
+            },
+        });
+
+        await newOrder.save();
+
+        // ── Notification ──────────────────────────────────────────────────────
+        await Notification.create({
+            user:    userId,
+            order:   newOrder._id,
+            title:   'Order Created, Payment Pending',
+            message: measurementRequested
+                ? `Your order for ${newOrder.style.title} includes a measurement service (+₦${MEASUREMENT_FEE.toLocaleString()}). Total: ₦${calculatedTotalPrice.toLocaleString()}. Please complete payment.`
+                : `Your order for ${newOrder.style.title} has been created. Total: ₦${calculatedTotalPrice.toLocaleString()}. Please complete payment.`,
+            type: 'order_status',
+        });
+
+        // ── Admin email ───────────────────────────────────────────────────────
+        try {
+            await sendEmail({
+                to: ADMIN_EMAIL,
+                subject: `NEW ORDER Created: ${newOrder._id} (Payment Pending)`,
+                html: `
+                    <h2>New Order Created!</h2>
+                    <p>Order ID: <strong>${newOrder._id}</strong></p>
+                    <p>Customer: ${newOrder.customerName} (${newOrder.customerEmail})</p>
+                    <p>Item: ${newOrder.style.title}</p>
+                    <p>Total: ₦${calculatedTotalPrice.toLocaleString()}</p>
+                    <p>Payment Status: <strong>UNPAID</strong></p>
+                    ${measurementRequested ? `<p>⚠️ <strong>Measurement service requested.</strong> A tailor needs to be scheduled. Fee: ₦${MEASUREMENT_FEE.toLocaleString()}</p>` : ''}
+                    <p>Notes: ${combinedNote || 'None'}</p>
+                    <p>Please monitor payment for this order.</p>
+                `,
+            });
+        } catch (emailError) {
+            console.error('Error sending admin email:', emailError);
+        }
+
+        res.status(201).json({
+            message: measurementRequested
+                ? 'Order created with measurement service. Payment is pending.'
+                : 'Order created. Payment is pending.',
+            order: newOrder,
+        });
+
+    } catch (err) {
+        console.error('Order creation error caught in controller:', err);
+        if (err.name === 'ValidationError') {
+            const errors = Object.values(err.errors).map(error => error.message);
+            return res.status(400).json({ message: 'Validation failed', errors });
+        }
+        res.status(500).json({ message: 'Failed to create order' });
     }
-
-    // ... your existing cleanStyle / cleanMaterial / image upload logic unchanged ...
-
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-
-    // ── Auto-build note ───────────────────────────────────────────────────
-    const measurementNote = measurementRequested
-      ? '📏 Measurement service requested (+₦1,500). A tailor will contact you to take your measurements.'
-      : '';
-
-    const combinedNote = [measurementNote, notes?.trim()]
-      .filter(Boolean)
-      .join('\n\n');
-    // ─────────────────────────────────────────────────────────────────────
-
-    const stylePrice           = parseFloat(cleanStyle.price)            || 0;
-    const materialPricePerYard = parseFloat(cleanMaterial.pricePerYard)  || 0;
-    const yardsRequired        = parseFloat(cleanStyle.yardsRequired)    || 0;
-    const measurementFee       = measurementRequested ? 1500 : 0;
-    const calculatedTotalPrice = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
-
-    const newOrder = new Order({
-      user:          userId,
-      customerName:  user.name,
-      customerEmail: user.email,
-      orderType,
-      style:         { ...cleanStyle,    image: styleImageUrl    },
-      material:      { ...cleanMaterial, image: materialImageUrl },
-      measurements,
-      notes:         combinedNote,
-      status:        'pending',
-      paymentStatus: 'unpaid',
-      totalPrice:    calculatedTotalPrice,
-      measurementRequest: {           // ← new
-        requested: measurementRequested,
-        fee:       1500,
-        paid:      false,
-      },
-    });
-
-    await newOrder.save();
-
-    // Notification text reflects measurement request
-    await Notification.create({
-      user:    userId,
-      order:   newOrder._id,
-      title:   'Order Created, Payment Pending',
-      message: measurementRequested
-        ? `Your order for ${newOrder.style.title} includes a measurement service (+₦1,500). Please complete payment.`
-        : `Your order for ${newOrder.style.title} has been created. Please complete payment.`,
-      type: 'order_status',
-    });
-
-    // ... rest of your email logic unchanged ...
-
-    res.status(201).json({
-      message: 'Order created. Payment is pending.',
-      order: newOrder,
-    });
-
-  } catch (err) {
-    console.error('Order creation error:', err);
-    res.status(500).json({ message: 'Failed to create order' });
-  }
 };
+
 export const payForOrder = async (req, res) => {
     try {
         const { orderId } = req.params;
@@ -164,15 +238,24 @@ export const payForOrder = async (req, res) => {
             order.paymentMethod = 'Paystack';
             order.paymentDetails = paymentGatewayResponse.data;
             order.status = 'in-progress';
+
+            // Mark measurement fee as paid if it was requested
+            if (order.measurementRequest?.requested) {
+                order.measurementRequest.paid = true;
+            }
+
             await order.save();
 
             const user = await User.findById(userId);
 
+            // Notification — mention measurement service if applicable
             await Notification.create({
-                user: userId,
+                user:  userId,
                 order: order._id,
-                title: 'Payment Successful!',
-                message: `Your payment for order ${order.style.title} was successful. Your order is now being processed.`,
+                title: 'Payment Successful! 🎉',
+                message: order.measurementRequest?.requested
+                    ? `Payment for ${order.style.title} confirmed. A tailor will contact you soon to schedule your measurement session.`
+                    : `Your payment for ${order.style.title} was successful. Your order is now being processed.`,
                 type: 'payment_success',
             });
 
@@ -189,6 +272,7 @@ export const payForOrder = async (req, res) => {
                             <h2>Payment Successful!</h2>
                             <p>Dear ${user.name},</p>
                             <p>Your payment for order <strong>${order.style.title}</strong> (Order ID: ${order._id}) of ₦${order.totalPrice.toLocaleString()} has been received.</p>
+                            ${order.measurementRequest?.requested ? `<p>📏 You requested our measurement service. A tailor will contact you within 24 hours to schedule a visit.</p>` : ''}
                             <p>Expected delivery date: <strong>${order.expectedDeliveryDate ? order.expectedDeliveryDate.toLocaleDateString() : 'To be determined'}</strong>.</p>
                             <p>Transaction Reference: ${reference}</p>
                         `,
@@ -209,6 +293,7 @@ export const payForOrder = async (req, res) => {
                         <p>Item: ${order.style.title}</p>
                         <p>Total: ₦${order.totalPrice.toLocaleString()}</p>
                         <p>Payment Reference: ${reference}</p>
+                        ${order.measurementRequest?.requested ? `<p>⚠️ <strong>ACTION REQUIRED:</strong> This customer paid for a measurement service. Please schedule a tailor visit.</p>` : ''}
                     `,
                 });
             } catch (emailError) {
@@ -224,7 +309,7 @@ export const payForOrder = async (req, res) => {
             await order.save();
 
             await Notification.create({
-                user: userId,
+                user:  userId,
                 order: order._id,
                 title: 'Payment Failed',
                 message: `Payment for your order ${order.style.title} failed. Please try again.`,
@@ -284,14 +369,12 @@ export const updateOrder = async (req, res) => {
         const { orderId } = req.params;
         const userId = req.user.id;
 
-        // Fetch the existing order first so we can return it alongside the updated version
         const existingOrder = await Order.findOne({ _id: orderId, user: userId });
 
         if (!existingOrder) {
             return res.status(404).json({ message: 'Order not found or access denied.' });
         }
 
-        // Log existing state to the server terminal before applying changes
         console.log(`[updateOrder] Order ${orderId} BEFORE update:`, JSON.stringify({
             style: existingOrder.style,
             material: existingOrder.material,
@@ -301,20 +384,13 @@ export const updateOrder = async (req, res) => {
             paymentStatus: existingOrder.paymentStatus,
         }, null, 2));
 
-        // Only allow fields the user is permitted to change.
-        // Status and paymentStatus are intentionally excluded — those are
-        // controlled by the payment flow and admin actions only.
         const { style, material, measurements, notes, paymentChannel } = req.body;
         const allowedUpdates = {};
 
-        if (notes !== undefined) allowedUpdates.notes = notes;
+        if (notes !== undefined)          allowedUpdates.notes          = notes;
         if (paymentChannel !== undefined) allowedUpdates.paymentChannel = paymentChannel;
-        if (measurements !== undefined) allowedUpdates.measurements = measurements;
+        if (measurements !== undefined)   allowedUpdates.measurements   = measurements;
 
-        // FIX: flatten nested objects into dot-notation keys so $set patches
-        // individual subdocument fields instead of replacing the whole object.
-        // Without this, sending { style: { title: 'X' } } would wipe out
-        // style.image, style.price, etc. entirely.
         if (style && typeof style === 'object') {
             for (const [key, value] of Object.entries(style)) {
                 allowedUpdates[`style.${key}`] = value;
@@ -342,7 +418,6 @@ export const updateOrder = async (req, res) => {
 
         res.status(200).json({
             message: 'Order updated successfully',
-            // Return the previous state so the frontend can show a before/after diff
             previousData: {
                 style: existingOrder.style,
                 material: existingOrder.material,
@@ -384,7 +459,7 @@ export const deleteOrder = async (req, res) => {
         cancelOrderNotifications(orderId);
 
         await Notification.create({
-            user: userId,
+            user:  userId,
             order: order._id,
             title: 'Order Cancelled',
             message: `Your order ${order.style.title} has been cancelled.`,
@@ -439,7 +514,7 @@ export const updateOrderAdmin = async (req, res) => {
             return res.status(404).json({ message: 'Order not found' });
         }
 
-        const originalStatus = existingOrder.status;
+        const originalStatus        = existingOrder.status;
         const originalPaymentStatus = existingOrder.paymentStatus;
 
         const flatUpdates = {};
@@ -466,7 +541,7 @@ export const updateOrderAdmin = async (req, res) => {
         if (updates.status && originalStatus !== updates.status) {
             if (updatedOrder.user?._id) {
                 await Notification.create({
-                    user: updatedOrder.user._id,
+                    user:  updatedOrder.user._id,
                     order: updatedOrder._id,
                     title: `Order Status Updated: ${updates.status.toUpperCase()}`,
                     message: `Your order for ${updatedOrder.style?.title || 'your item'} has been updated to '${updates.status}'.`,
@@ -490,7 +565,7 @@ export const updateOrderAdmin = async (req, res) => {
         if (updates.paymentStatus && originalPaymentStatus !== updates.paymentStatus) {
             if (updatedOrder.user?._id) {
                 await Notification.create({
-                    user: updatedOrder.user._id,
+                    user:  updatedOrder.user._id,
                     order: updatedOrder._id,
                     title: `Payment Status Updated: ${updates.paymentStatus.toUpperCase()}`,
                     message: `Payment for ${updatedOrder.style?.title || 'item'} updated to '${updates.paymentStatus}'.`,
@@ -541,7 +616,7 @@ export const deleteOrderAdmin = async (req, res) => {
 
         if (order.user) {
             await Notification.create({
-                user: order.user,
+                user:  order.user,
                 order: order._id,
                 title: 'Order Permanently Deleted',
                 message: `Your order ${order.style?.title || 'your item'} has been permanently deleted.`,
