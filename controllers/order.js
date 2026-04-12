@@ -183,6 +183,7 @@ export const getAllOrdersAdmin = async (req, res) => {
       return res.status(403).json({ message: 'Admins only.' });
     }
 
+    // ✅ Only return paid orders to admin
     const orders = await Order.find({ paymentStatus: 'paid' })
       .sort({ createdAt: -1 })
       .populate('user', 'name email');
@@ -245,21 +246,21 @@ const formatOrderForAdminFrontend = (order) => {
   return {
     _id: order._id,
     user: order.user ? { _id: order.user._id, name: order.user.name, email: order.user.email } : null,
-    customerName: order.customerName,
-    customerEmail: order.customerEmail,
-    orderType: order.orderType,
-    status: order.status,
-    paymentStatus: order.paymentStatus,
-    totalPrice: order.totalPrice,
-    date: order.createdAt.toISOString().split('T')[0],
-    notes: order.notes,
-    style: order.style,
-    material: order.material,
-    measurements: order.measurements,
-    measurementRequest: order.measurementRequest,
-    paymentReference: order.paymentReference,
-    createdAt: order.createdAt,
-    updatedAt: order.updatedAt,
+    customerName:        order.customerName,
+    customerEmail:       order.customerEmail,
+    orderType:           order.orderType,
+    status:              order.status,
+    paymentStatus:       order.paymentStatus,
+    totalPrice:          order.totalPrice,
+    date:                order.createdAt.toISOString().split('T')[0],
+    notes:               order.notes,
+    style:               order.style,
+    material:            order.material,
+    measurements:        order.measurements,
+    measurementRequest:  order.measurementRequest,
+    paymentReference:    order.paymentReference,
+    createdAt:           order.createdAt,
+    updatedAt:           order.updatedAt,
     expectedDeliveryDate: order.expectedDeliveryDate,
   };
 };
@@ -439,9 +440,14 @@ export const deleteOrder = async (req, res) => {
   }
 };
 
+// ── GET /api/orders/admin ─────────────────────────────────────────────────────
+// ✅ Only returns paid orders — unpaid orders are completely invisible to admin
 export const getAdminOrders = async (req, res) => {
   try {
-    const orders = await Order.find().populate('user', 'name email').sort({ createdAt: -1 });
+    const orders = await Order.find({ paymentStatus: 'paid' })
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 });
+
     const formattedOrders = orders.map(formatOrderForAdminFrontend);
     res.status(200).json({ message: 'All orders retrieved successfully for admin', orders: formattedOrders });
   } catch (err) {
@@ -450,13 +456,17 @@ export const getAdminOrders = async (req, res) => {
   }
 };
 
+// ── GET /api/orders/admin/:id ─────────────────────────────────────────────────
+// ✅ Only finds the order if it's paid — unpaid orders return 404 to admin
 export const getAdminOrderById = async (req, res) => {
   try {
     const { id } = req.params;
-    const order = await Order.findById(id).populate('user', 'name email');
+
+    const order = await Order.findOne({ _id: id, paymentStatus: 'paid' })
+      .populate('user', 'name email');
 
     if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
+      return res.status(404).json({ message: 'Order not found.' });
     }
 
     res.status(200).json({
@@ -474,9 +484,10 @@ export const updateOrderAdmin = async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
-    const existingOrder = await Order.findById(id);
+    // ✅ Only allow updates on paid orders
+    const existingOrder = await Order.findOne({ _id: id, paymentStatus: 'paid' });
     if (!existingOrder) {
-      return res.status(404).json({ message: 'Order not found' });
+      return res.status(404).json({ message: 'Order not found.' });
     }
 
     const originalStatus        = existingOrder.status;
@@ -500,7 +511,7 @@ export const updateOrderAdmin = async (req, res) => {
     ).populate('user', 'name email');
 
     if (!updatedOrder) {
-      return res.status(404).json({ message: 'Order not found after update' });
+      return res.status(404).json({ message: 'Order not found after update.' });
     }
 
     if (updates.status && originalStatus !== updates.status) {
@@ -571,10 +582,12 @@ export const updateOrderAdmin = async (req, res) => {
 export const deleteOrderAdmin = async (req, res) => {
   try {
     const { id } = req.params;
-    const order = await Order.findByIdAndDelete(id);
+
+    // ✅ Only allow deletion of paid orders
+    const order = await Order.findOneAndDelete({ _id: id, paymentStatus: 'paid' });
 
     if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
+      return res.status(404).json({ message: 'Order not found.' });
     }
 
     cancelOrderNotifications(id);
