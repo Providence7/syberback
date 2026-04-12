@@ -1,67 +1,78 @@
 // utils/webPush.js
-// ✅ NEW FILE — handles Web Push API via the `web-push` npm package.
-//
-// Setup:
-//   1. npm install web-push
-//   2. npx web-push generate-vapid-keys   (run once, paste output into .env)
-//   3. Add to .env:
-//        VAPID_PUBLIC_KEY=...
-//        VAPID_PRIVATE_KEY=...
-//        VAPID_EMAIL=mailto:you@yourdomain.com
-//   4. Add to frontend .env:
-//        VITE_VAPID_PUBLIC_KEY=<same public key>
-
 import webpush from 'web-push';
 import User from '../models/user.js';
 
+// ── VAPID setup with validation ───────────────────────────────────────────────
+const { VAPID_EMAIL, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY } = process.env;
+
+if (!VAPID_EMAIL || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+  console.error('❌ VAPID env vars missing:', {
+    VAPID_EMAIL:       !!VAPID_EMAIL,
+    VAPID_PUBLIC_KEY:  !!VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY: !!VAPID_PRIVATE_KEY,
+  });
+} else {
+  console.log('✅ VAPID keys loaded. Email:', VAPID_EMAIL);
+}
+
 webpush.setVapidDetails(
-  process.env.VAPID_EMAIL,
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY,
+  VAPID_EMAIL,
+  VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY,
 );
 
-/**
- * Send a Web Push notification to a single subscription object.
- * Returns 'expired' when the subscription is no longer valid (HTTP 410)
- * so the caller can clean it up from the database.
- *
- * @param {object} subscription  - PushSubscription from the browser / DB
- * @param {object} payload       - { title, message, type, icon? }
- * @returns {Promise<'expired'|void>}
- */
+// ── Send push to a raw subscription object ────────────────────────────────────
 export const sendPushToUser = async (subscription, payload) => {
-  if (!subscription?.endpoint) return;
+  if (!subscription?.endpoint) {
+    console.warn('⚠️ sendPushToUser: no endpoint on subscription, skipping');
+    return;
+  }
+
+  console.log('📤 Attempting web push to:', subscription.endpoint.slice(0, 70) + '...');
+
   try {
-    await webpush.sendNotification(subscription, JSON.stringify(payload));
+    const result = await webpush.sendNotification(
+      subscription,
+      JSON.stringify({
+        title:   payload.title   || 'AttireByte',
+        message: payload.message || '',
+        type:    payload.type    || 'info',
+      })
+    );
+    console.log('✅ Web push sent! Status:', result.statusCode);
   } catch (err) {
+    console.error('❌ Web push FAILED. Status:', err.statusCode, '| Body:', err.body || err.message);
     if (err.statusCode === 410 || err.statusCode === 404) {
-      // Subscription has expired or been unsubscribed — signal caller to delete it
       return 'expired';
     }
-    console.error('Web push error:', err.message);
   }
 };
 
-/**
- * Convenience wrapper: look up a user's saved push subscription and fire a
- * push notification, automatically cleaning up expired subscriptions.
- *
- * @param {string|ObjectId} userId
- * @param {object}          payload  - { title, message, type }
- */
+// ── Look up user's saved subscription then send ───────────────────────────────
 export const pushNotifyUser = async (userId, payload) => {
   try {
-    const user = await User.findById(userId).select('pushSubscription');
-    if (!user?.pushSubscription) return;
+    console.log('🔍 pushNotifyUser: checking subscription for user', userId.toString());
 
+    const user = await User.findById(userId).select('pushSubscription name');
+
+    if (!user) {
+      console.warn('⚠️ pushNotifyUser: user not found:', userId);
+      return;
+    }
+
+    if (!user.pushSubscription) {
+      console.warn(`⚠️ pushNotifyUser: "${user.name}" has NO push subscription — they haven't allowed notifications yet`);
+      return;
+    }
+
+    console.log(`📬 Sending push to "${user.name}"...`);
     const result = await sendPushToUser(user.pushSubscription, payload);
 
     if (result === 'expired') {
-      // Subscription is stale — remove it so we don't keep trying
+      console.log(`🗑️ Removing stale subscription for "${user.name}"`);
       await User.findByIdAndUpdate(userId, { $unset: { pushSubscription: '' } });
-      console.log(`Cleaned up expired push subscription for user ${userId}`);
     }
   } catch (err) {
-    console.error('pushNotifyUser error:', err.message);
+    console.error('❌ pushNotifyUser error:', err.message);
   }
 };
