@@ -35,6 +35,7 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  pushSubscription: { type: Object, default: null },
   emailToken: String,
   emailTokenExpires: Date,
   resetToken: String,

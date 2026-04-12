@@ -6,6 +6,8 @@ import {
   markAllAsRead,
   markNotificationAsRead,
   adminSendNotification,
+  deleteNotification,     // ✅ NEW
+  savePushSubscription,   // ✅ NEW
 } from '../controllers/notify.js';
 
 const router = express.Router();
@@ -18,9 +20,11 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-router.get('/',              protect,              getNotifications);
-router.post('/read-all',     protect,              markAllAsRead);
-router.post('/admin/send',   protect, adminOnly,   adminSendNotification);  // ← admin only
-router.post('/:id/read',     protect,              markNotificationAsRead);
+router.get('/',              protect,            getNotifications);
+router.post('/read-all',     protect,            markAllAsRead);
+router.post('/subscribe',    protect,            savePushSubscription);  // ✅ NEW
+router.post('/admin/send',   protect, adminOnly, adminSendNotification);
+router.post('/:id/read',     protect,            markNotificationAsRead);
+router.delete('/:id',        protect,            deleteNotification);    // ✅ NEW
 
 export default router;

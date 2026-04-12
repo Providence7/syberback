@@ -1,8 +1,10 @@
 // utils/notifyUser.js
 import Notification from '../models/notification.js';
+import { pushNotifyUser } from './webPush.js'; // ✅ NEW import
 
 /**
  * Creates a DB notification and emits it in real-time via Socket.io
+ * Also sends a Web Push so the user gets it even when the tab is closed.
  * @param {object} io        - The Socket.io server instance
  * @param {string} userId    - Target user's MongoDB _id (string)
  * @param {object} payload   - { title, message, type, category }
@@ -28,8 +30,11 @@ export const notifyUser = async (io, userId, { title, message, type = 'info', ca
       createdAt: notif.createdAt.toISOString(),
     };
 
-    // Emit to the specific user's socket room
+    // Emit to the specific user's socket room (works when tab is open)
     io.to(`user:${userId}`).emit('notification', payload);
+
+    // ✅ NEW: Web Push (works even when tab is closed / phone is locked)
+    await pushNotifyUser(userId, { title, message, type });
 
     return notif;
   } catch (err) {

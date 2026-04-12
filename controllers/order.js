@@ -7,12 +7,240 @@ import { sendEmail } from '../utils/email.js';
 import { scheduleOrderNotifications, cancelOrderNotifications } from '../utils/notificationScheduler.js';
 import axios from 'axios';
 import dotenv from 'dotenv';
-
+import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js';
 dotenv.config();
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 const MEASUREMENT_FEE = 1500;
+
+const addWorkingDays = (startDate, days) => {
+  const date = new Date(startDate);
+  let added = 0;
+  while (added < days) {
+    date.setDate(date.getDate() + 1);
+    const day = date.getDay();
+    if (day !== 0 && day !== 6) added++;
+  }
+  return date;
+};
+ 
+// ── POST /api/orders ──────────────────────────────────────────────────────────
+// Create order — status = pendingPayment, NO delivery date, NO admin notification.
+export const createOrder = async (req, res) => {
+  try {
+    const {
+      style, material, measurements, notes,
+      totalPrice, paymentChannel,
+      measurementRequested, requestedSize,
+    } = req.body;
+ 
+    if (!style || !material) {
+      return res.status(400).json({ message: 'Style and material are required.' });
+    }
+ 
+    const order = await Order.create({
+      user:      req.user.id,
+      style,
+      material,
+      measurements:  measurements || null,
+      notes:         notes        || '',
+      totalPrice,
+      paymentChannel: paymentChannel || 'card',
+      measurementRequested: !!measurementRequested,
+      requestedSize:  requestedSize || null,
+      status:         'pendingPayment', // ✅ always starts here
+      paymentStatus:  'unpaid',
+      expectedDeliveryDate: null,       // ✅ never set on creation
+    });
+ 
+    // ✅ No admin notification here — wait for payment
+ 
+    // Notify the user their order is created and awaiting payment
+    const io = req.app.get('io');
+    await notifyUser(io, req.user.id, {
+      title:    'Order Created',
+      message:  `Your order for "${style.title}" has been placed. Complete payment to confirm it.`,
+      type:     'info',
+      category: 'order',
+    });
+ 
+    res.status(201).json({ message: 'Order created successfully.', order });
+  } catch (err) {
+    console.error('createOrder error:', err);
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+ 
+// ── POST /api/orders/:id/pay ──────────────────────────────────────────────────
+// Verify Paystack payment, update order, set delivery date, THEN notify admin.
+export const verifyOrderPayment = async (req, res) => {
+  try {
+    const { reference } = req.body;
+    const order = await Order.findById(req.params.id);
+ 
+    if (!order) return res.status(404).json({ message: 'Order not found.' });
+    if (order.user.toString() !== req.user.id.toString()) {
+      return res.status(403).json({ message: 'Not authorised.' });
+    }
+    if (order.paymentStatus === 'paid') {
+      return res.status(400).json({ message: 'Order already paid.' });
+    }
+ 
+    // ── Verify with Paystack ────────────────────────────────────────────────
+    const paystackRes = await fetch(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } }
+    );
+    const paystackData = await paystackRes.json();
+ 
+    if (!paystackData.status || paystackData.data?.status !== 'success') {
+      order.paymentStatus = 'failed';
+      await order.save();
+      return res.status(400).json({ message: 'Payment verification failed.' });
+    }
+ 
+    // ✅ Payment confirmed — now update everything
+    order.paymentStatus       = 'paid';
+    order.paymentReference    = reference;
+    order.status              = 'in-progress';
+    order.expectedDeliveryDate = addWorkingDays(new Date(), 7); // ✅ 7 working days from now
+ 
+    await order.save();
+ 
+    const io            = req.app.get('io');
+    const deliveryLabel = order.expectedDeliveryDate.toLocaleDateString('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+ 
+    // ✅ Notify the customer
+    await notifyUser(io, req.user.id, {
+      title:    'Payment Confirmed! 🎉',
+      message:  `Your order for "${order.style?.title}" is now in progress. Expected delivery: ${deliveryLabel}.`,
+      type:     'success',
+      category: 'order',
+    });
+ 
+    // ✅ Notify EVERY admin — only fires after verified payment
+    const admins = await User.find({ isAdmin: true }, '_id');
+    if (admins.length > 0) {
+      await broadcastNotification(
+        io,
+        admins.map(a => a._id),
+        {
+          title:    '💳 New Paid Order',
+          message:  `${order.customerName} just paid for "${order.style?.title}". Order is in progress. Delivery: ${deliveryLabel}.`,
+          type:     'success',
+          category: 'order',
+        }
+      );
+    }
+ 
+    res.status(200).json({ message: 'Payment verified. Order is now in progress.', order });
+  } catch (err) {
+    console.error('verifyOrderPayment error:', err);
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+ 
+// ── GET /api/orders ───────────────────────────────────────────────────────────
+export const getUserOrders = async (req, res) => {
+  try {
+    const orders = await Order.find({ user: req.user.id }).sort({ createdAt: -1 });
+    res.status(200).json(orders);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+ 
+// ── GET /api/orders/:id ───────────────────────────────────────────────────────
+export const getOrderById = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found.' });
+ 
+    // Allow access to the owner or any admin
+    const isOwner = order.user.toString() === req.user.id.toString();
+    if (!isOwner && !req.user.isAdmin) {
+      return res.status(403).json({ message: 'Not authorised.' });
+    }
+ 
+    res.status(200).json({ order });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+ 
+// ── GET /api/orders/admin/all ─────────────────────────────────────────────────
+// ✅ Admin only sees PAID orders (paymentStatus: 'paid')
+export const getAllOrdersAdmin = async (req, res) => {
+  try {
+    if (!req.user?.isAdmin) {
+      return res.status(403).json({ message: 'Admins only.' });
+    }
+ 
+    // ✅ Only return paid orders to admin
+    const orders = await Order.find({ paymentStatus: 'paid' })
+      .sort({ createdAt: -1 })
+      .populate('user', 'name email');
+ 
+    res.status(200).json(orders);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+ 
+// ── PATCH /api/orders/:id/status ─────────────────────────────────────────────
+// Admin updates order status (e.g. in-progress → completed after delivery).
+export const updateOrderStatus = async (req, res) => {
+  try {
+    if (!req.user?.isAdmin) {
+      return res.status(403).json({ message: 'Admins only.' });
+    }
+ 
+    const { status } = req.body;
+    const allowed    = ['in-progress', 'completed', 'cancelled', 'ready-for-pickup'];
+ 
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: `Invalid status. Allowed: ${allowed.join(', ')}` });
+    }
+ 
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Order not found.' });
+ 
+    // ✅ Only allow status changes on paid orders
+    if (order.paymentStatus !== 'paid') {
+      return res.status(400).json({ message: 'Cannot update status of an unpaid order.' });
+    }
+ 
+    order.status = status;
+    await order.save();
+ 
+    const io = req.app.get('io');
+ 
+    // Notify the customer of the status change
+    const statusMessages = {
+      'completed':        { title: 'Order Delivered! 🎉', message: `Your order for "${order.style?.title}" has been delivered. Thank you!`, type: 'success' },
+      'ready-for-pickup': { title: 'Ready for Pickup! 📦', message: `Your order for "${order.style?.title}" is ready for pickup.`, type: 'info' },
+      'cancelled':        { title: 'Order Cancelled', message: `Your order for "${order.style?.title}" has been cancelled. Contact us for more info.`, type: 'error' },
+      'in-progress':      { title: 'Order In Progress', message: `Your order for "${order.style?.title}" is now being worked on.`, type: 'info' },
+    };
+ 
+    const notifPayload = statusMessages[status];
+    if (notifPayload) {
+      await notifyUser(io, order.user.toString(), {
+        ...notifPayload,
+        category: 'order',
+      });
+    }
+ 
+    res.status(200).json({ message: `Order status updated to "${status}".`, order });
+  } catch (err) {
+    console.error('updateOrderStatus error:', err);
+    res.status(500).json({ message: err.message });
+  }
+};
+ 
 
 const formatOrderForAdminFrontend = (order) => {
     return {
@@ -37,155 +265,6 @@ const formatOrderForAdminFrontend = (order) => {
     };
 };
 
-export const createOrder = async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const {
-            style,
-            material,
-            measurements,
-            notes,
-            orderType = 'Online',
-            measurementRequested = false,   // ← from frontend toggle
-        } = req.body;
-
-        if (!style || !material) {
-            return res.status(400).json({ message: 'Style and material data are required.' });
-        }
-
-        const cleanStyle = {
-            title: style.title,
-            price: typeof style.price === 'number' ? style.price : (parseFloat(style.price) || 0),
-            yardsRequired: typeof style.yardsRequired === 'number' ? style.yardsRequired : (parseFloat(style.yardsRequired) || 0),
-            recommendedMaterials: style.recommendedMaterials || [],
-            image: style.image
-        };
-
-        const cleanMaterial = {
-            name: material.name,
-            type: material.type,
-            pricePerYard: typeof material.pricePerYard === 'number' ? material.pricePerYard : (parseFloat(material.pricePerYard) || 0),
-            image: material.image
-        };
-
-        if (!cleanStyle.title || !cleanStyle.image || !cleanMaterial.name || !cleanMaterial.image) {
-            return res.status(400).json({ message: 'Style title, style image, material name, and material image are required.' });
-        }
-
-        // ── Image uploads ─────────────────────────────────────────────────────
-        let styleImageUrl = cleanStyle.image;
-        if (cleanStyle.image && typeof cleanStyle.image === 'string' && cleanStyle.image.startsWith('data:image')) {
-            try {
-                const uploadedStyle = await cloudinary.uploader.upload(cleanStyle.image, { folder: 'orders/styles' });
-                styleImageUrl = uploadedStyle.secure_url;
-            } catch (uploadError) {
-                return res.status(500).json({ message: 'Failed to upload style image.' });
-            }
-        }
-
-        let materialImageUrl = cleanMaterial.image;
-        if (cleanMaterial.image && typeof cleanMaterial.image === 'string' && cleanMaterial.image.startsWith('data:image')) {
-            try {
-                const uploadedMaterial = await cloudinary.uploader.upload(cleanMaterial.image, { folder: 'orders/materials' });
-                materialImageUrl = uploadedMaterial.secure_url;
-            } catch (uploadError) {
-                return res.status(500).json({ message: 'Failed to upload material image.' });
-            }
-        }
-
-        const user = await User.findById(userId);
-        if (!user) {
-            return res.status(404).json({ message: 'User not found' });
-        }
-
-        // ── Price calculation (includes measurement fee if requested) ─────────
-        const stylePrice           = parseFloat(cleanStyle.price)           || 0;
-        const materialPricePerYard = parseFloat(cleanMaterial.pricePerYard) || 0;
-        const yardsRequired        = parseFloat(cleanStyle.yardsRequired)   || 0;
-        const measurementFee       = measurementRequested ? MEASUREMENT_FEE : 0;
-        const calculatedTotalPrice = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
-
-        // ── Auto-build note ───────────────────────────────────────────────────
-        // The system note is always added when measurement is requested,
-        // even if the user left the notes field empty.
-        const systemNote = measurementRequested
-            ? `📏 [Measurement Service Requested] A tailor will contact this customer to schedule a measurement session. Measurement fee of ₦${MEASUREMENT_FEE.toLocaleString()} has been included in the order total.`
-            : '';
-
-        const userNote = notes?.trim() ? `📝 Customer note: ${notes.trim()}` : '';
-
-        const combinedNote = [systemNote, userNote].filter(Boolean).join('\n\n');
-
-        // ── Create order ──────────────────────────────────────────────────────
-        const newOrder = new Order({
-            user:          userId,
-            customerName:  user.name,
-            customerEmail: user.email,
-            orderType,
-            style:         { ...cleanStyle,    image: styleImageUrl    },
-            material:      { ...cleanMaterial, image: materialImageUrl },
-            measurements:  measurements || null,
-            notes:         combinedNote,
-            status:        'pending',
-            paymentStatus: 'unpaid',
-            totalPrice:    calculatedTotalPrice,
-            measurementRequest: {
-                requested: measurementRequested,
-                fee:       MEASUREMENT_FEE,
-                paid:      false,
-            },
-        });
-
-        await newOrder.save();
-
-        // ── Notification ──────────────────────────────────────────────────────
-        await Notification.create({
-            user:    userId,
-            order:   newOrder._id,
-            title:   'Order Created, Payment Pending',
-            message: measurementRequested
-                ? `Your order for ${newOrder.style.title} includes a measurement service (+₦${MEASUREMENT_FEE.toLocaleString()}). Total: ₦${calculatedTotalPrice.toLocaleString()}. Please complete payment.`
-                : `Your order for ${newOrder.style.title} has been created. Total: ₦${calculatedTotalPrice.toLocaleString()}. Please complete payment.`,
-            type: 'order_status',
-        });
-
-        // ── Admin email ───────────────────────────────────────────────────────
-        try {
-            await sendEmail({
-                to: ADMIN_EMAIL,
-                subject: `NEW ORDER Created: ${newOrder._id} (Payment Pending)`,
-                html: `
-                    <h2>New Order Created!</h2>
-                    <p>Order ID: <strong>${newOrder._id}</strong></p>
-                    <p>Customer: ${newOrder.customerName} (${newOrder.customerEmail})</p>
-                    <p>Item: ${newOrder.style.title}</p>
-                    <p>Total: ₦${calculatedTotalPrice.toLocaleString()}</p>
-                    <p>Payment Status: <strong>UNPAID</strong></p>
-                    ${measurementRequested ? `<p>⚠️ <strong>Measurement service requested.</strong> A tailor needs to be scheduled. Fee: ₦${MEASUREMENT_FEE.toLocaleString()}</p>` : ''}
-                    <p>Notes: ${combinedNote || 'None'}</p>
-                    <p>Please monitor payment for this order.</p>
-                `,
-            });
-        } catch (emailError) {
-            console.error('Error sending admin email:', emailError);
-        }
-
-        res.status(201).json({
-            message: measurementRequested
-                ? 'Order created with measurement service. Payment is pending.'
-                : 'Order created. Payment is pending.',
-            order: newOrder,
-        });
-
-    } catch (err) {
-        console.error('Order creation error caught in controller:', err);
-        if (err.name === 'ValidationError') {
-            const errors = Object.values(err.errors).map(error => error.message);
-            return res.status(400).json({ message: 'Validation failed', errors });
-        }
-        res.status(500).json({ message: 'Failed to create order' });
-    }
-};
 
 export const payForOrder = async (req, res) => {
     try {
@@ -328,116 +407,6 @@ export const payForOrder = async (req, res) => {
             return res.status(400).json({ message: 'Invalid order ID format.' });
         }
         res.status(500).json({ message: 'Failed to process payment for order.' });
-    }
-};
-
-export const getUserOrders = async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const orders = await Order.find({ user: userId }).sort({ createdAt: -1 });
-        res.status(200).json({ message: 'User orders retrieved successfully', orders });
-    } catch (err) {
-        console.error('Error fetching user orders:', err);
-        res.status(500).json({ message: 'Failed to fetch user orders' });
-    }
-};
-
-export const getOrderById = async (req, res) => {
-    try {
-        const { orderId } = req.params;
-        const userId = req.user.id;
-
-        const order = await Order.findOne({ _id: orderId, user: userId }).populate('user', 'name email');
-
-        if (!order) {
-            return res.status(404).json({ message: 'Order not found or you do not have access to it.' });
-        }
-
-        res.status(200).json({ message: 'Order retrieved successfully', order });
-
-    } catch (err) {
-        console.error('Error fetching single order:', err);
-        if (err.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid order ID format.' });
-        }
-        res.status(500).json({ message: 'Failed to fetch order' });
-    }
-};
-
-export const updateOrder = async (req, res) => {
-    try {
-        const { orderId } = req.params;
-        const userId = req.user.id;
-
-        const existingOrder = await Order.findOne({ _id: orderId, user: userId });
-
-        if (!existingOrder) {
-            return res.status(404).json({ message: 'Order not found or access denied.' });
-        }
-
-        console.log(`[updateOrder] Order ${orderId} BEFORE update:`, JSON.stringify({
-            style: existingOrder.style,
-            material: existingOrder.material,
-            measurements: existingOrder.measurements,
-            notes: existingOrder.notes,
-            status: existingOrder.status,
-            paymentStatus: existingOrder.paymentStatus,
-        }, null, 2));
-
-        const { style, material, measurements, notes, paymentChannel } = req.body;
-        const allowedUpdates = {};
-
-        if (notes !== undefined)          allowedUpdates.notes          = notes;
-        if (paymentChannel !== undefined) allowedUpdates.paymentChannel = paymentChannel;
-        if (measurements !== undefined)   allowedUpdates.measurements   = measurements;
-
-        if (style && typeof style === 'object') {
-            for (const [key, value] of Object.entries(style)) {
-                allowedUpdates[`style.${key}`] = value;
-            }
-        }
-
-        if (material && typeof material === 'object') {
-            for (const [key, value] of Object.entries(material)) {
-                allowedUpdates[`material.${key}`] = value;
-            }
-        }
-
-        const updatedOrder = await Order.findByIdAndUpdate(
-            orderId,
-            { $set: allowedUpdates },
-            { new: true, runValidators: true }
-        );
-
-        console.log(`[updateOrder] Order ${orderId} AFTER update:`, JSON.stringify({
-            style: updatedOrder.style,
-            material: updatedOrder.material,
-            measurements: updatedOrder.measurements,
-            notes: updatedOrder.notes,
-        }, null, 2));
-
-        res.status(200).json({
-            message: 'Order updated successfully',
-            previousData: {
-                style: existingOrder.style,
-                material: existingOrder.material,
-                measurements: existingOrder.measurements,
-                notes: existingOrder.notes,
-                totalPrice: existingOrder.totalPrice,
-            },
-            order: updatedOrder,
-        });
-
-    } catch (err) {
-        console.error('Update Error:', err.message);
-        if (err.name === 'ValidationError') {
-            const errors = Object.values(err.errors).map(e => e.message);
-            return res.status(400).json({ message: 'Validation failed', errors });
-        }
-        if (err.name === 'CastError') {
-            return res.status(400).json({ message: 'Invalid order ID format.' });
-        }
-        res.status(400).json({ message: 'Update failed', reason: err.message });
     }
 };
 

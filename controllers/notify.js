@@ -1,12 +1,10 @@
 // controllers/notification.js
-// controllers/notify.js
 import mongoose from 'mongoose';
 import Notification from '../models/notification.js';
-import User from '../models/user.js';                                    // ← add this
-import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js'; // ← add this
+import User from '../models/user.js';
+import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js';
 
 export const getNotifications = async (req, res) => {
- 
   try {
     if (!req.user?.id) {
       console.log('No user ID found in request');
@@ -19,8 +17,6 @@ export const getNotifications = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(50);
 
- 
-
     const transformedNotifications = notifications.map(notif => ({
       ...notif.toObject(),
       id: notif._id.toString()
@@ -32,11 +28,10 @@ export const getNotifications = async (req, res) => {
     res.status(500).json({ message: 'Server error while fetching notifications' });
   }
 };
-// In controllers/notification.js — add this export
 
 export const adminSendNotification = async (req, res) => {
- try {
-    if (!req.user?.isAdmin) {                          // ← was role !== 'admin'
+  try {
+    if (!req.user?.isAdmin) {
       return res.status(403).json({ message: 'Admins only' });
     }
 
@@ -51,7 +46,6 @@ export const adminSendNotification = async (req, res) => {
       if (!userId) return res.status(400).json({ message: 'userId required for targeted scope' });
       await notifyUser(io, userId, { title, message, type, category: 'admin' });
     } else {
-      // broadcast
       const users = await User.find({}, '_id');
       await broadcastNotification(io, users.map(u => u._id), { title, message, type, category: 'admin' });
     }
@@ -104,7 +98,6 @@ export const markNotificationAsRead = async (req, res) => {
     const userId = new mongoose.Types.ObjectId(req.user.id);
     const notificationId = req.params.id;
 
-    // Validate notification ID
     if (!mongoose.Types.ObjectId.isValid(notificationId)) {
       console.log('Invalid notification ID format:', notificationId);
       return res.status(400).json({ 
@@ -113,13 +106,6 @@ export const markNotificationAsRead = async (req, res) => {
       });
     }
 
-    console.log('Looking for notification with conditions:', {
-      _id: notificationId,
-      user: userId.toString(),
-      read: false
-    });
-
-    // First, let's check if the notification exists at all
     const existingNotification = await Notification.findById(notificationId);
     console.log('Existing notification:', existingNotification);
 
@@ -147,7 +133,6 @@ export const markNotificationAsRead = async (req, res) => {
       });
     }
 
-    // Update the notification
     const updatedNotification = await Notification.findByIdAndUpdate(
       notificationId,
       { $set: { read: true } },
@@ -162,6 +147,62 @@ export const markNotificationAsRead = async (req, res) => {
     });
   } catch (error) {
     console.error('Error marking notification as read:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ✅ NEW: permanently delete a single notification owned by the requesting user
+export const deleteNotification = async (req, res) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: 'User not authenticated' });
+    }
+
+    const userId         = new mongoose.Types.ObjectId(req.user.id);
+    const notificationId = req.params.id;
+
+    if (!mongoose.Types.ObjectId.isValid(notificationId)) {
+      return res.status(400).json({ success: false, message: 'Invalid notification ID format' });
+    }
+
+    const notif = await Notification.findById(notificationId);
+
+    if (!notif) {
+      return res.status(404).json({ success: false, message: 'Notification not found' });
+    }
+
+    if (notif.user.toString() !== userId.toString()) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    await notif.deleteOne();
+
+    res.status(200).json({ success: true, message: 'Notification deleted' });
+  } catch (error) {
+    console.error('Error deleting notification:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ✅ NEW: save the browser's Web Push subscription so the backend can send
+//         push notifications even when the tab is closed
+export const savePushSubscription = async (req, res) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, message: 'User not authenticated' });
+    }
+
+    const { subscription } = req.body;
+
+    if (!subscription?.endpoint) {
+      return res.status(400).json({ success: false, message: 'Invalid subscription object' });
+    }
+
+    await User.findByIdAndUpdate(req.user.id, { pushSubscription: subscription });
+
+    res.status(200).json({ success: true, message: 'Push subscription saved' });
+  } catch (error) {
+    console.error('Error saving push subscription:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
