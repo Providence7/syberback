@@ -50,13 +50,13 @@ const orderSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: [
-      'pendingPayment', // ✅ default before payment
-      'in-progress',    // ✅ set after payment verified
-      'completed',      // ✅ admin marks as delivered
+      'pendingPayment',
+      'in-progress',
+      'completed',
       'cancelled',
       'ready-for-pickup',
     ],
-    default: 'pendingPayment', // ✅ always starts here — no delivery date yet
+    default: 'pendingPayment',
   },
 
   paymentStatus: {
@@ -65,9 +65,14 @@ const orderSchema = new mongoose.Schema({
     default: 'unpaid',
   },
 
+  // ✅ FIX: totalPrice is set explicitly on creation and NEVER recalculated
+  // on subsequent saves. Recalculation was causing the Paystack amount
+  // mismatch: controller sets paymentStatus='paid' then calls order.save(),
+  // the pre-save hook was recalculating totalPrice which could differ from
+  // what Paystack verified, making all future saves fail the amount check.
   totalPrice: { type: Number, required: true, min: 0 },
 
-  // ✅ NULL until payment is verified — never set on creation
+  // ✅ NULL until payment is verified — set by controller, not by model hook
   expectedDeliveryDate: { type: Date, default: null },
 
   paymentReference: { type: String, unique: true, sparse: true },
@@ -79,9 +84,13 @@ const orderSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// ── Pre-save: auto-fill customer info & recalculate total ─────────────────────
+// ── Pre-save: ONLY auto-fill customer info on new documents ──────────────────
+// ✅ FIX: Removed totalPrice recalculation from pre-save entirely.
+//    Removed expectedDeliveryDate + status mutation from pre-save entirely.
+//    Both are now the sole responsibility of the controller after payment,
+//    preventing double-execution and race conditions.
 orderSchema.pre('save', async function (next) {
-  // Auto-fill customer name/email from User if missing
+  // Auto-fill customer name/email from User only when missing on new docs
   if (this.isNew && this.user && (!this.customerName || !this.customerEmail)) {
     try {
       const User = mongoose.model('User');
@@ -95,44 +104,41 @@ orderSchema.pre('save', async function (next) {
     }
   }
 
-  // Recalculate total when relevant fields change
-  if (
-    this.isNew ||
-    this.isModified('style') ||
-    this.isModified('material') ||
-    this.isModified('measurementRequest')
-  ) {
-    const stylePrice           = parseFloat(this.style?.price)           || 0;
-    const materialPricePerYard = parseFloat(this.material?.pricePerYard) || 0;
-    const yardsRequired        = parseFloat(this.style?.yardsRequired)   || 0;
-    const measurementFee       = this.measurementRequest?.requested
-                                   ? (this.measurementRequest.fee || 1500)
-                                   : 0;
-
-    const total = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
-    this.totalPrice = isNaN(total) ? 0 : total;
-  }
-
-  // ✅ Set expectedDeliveryDate to 7 WORKING DAYS after payment is verified.
-  // Only runs the first time paymentStatus flips to 'paid'.
-  if (this.isModified('paymentStatus') && this.paymentStatus === 'paid' && !this.expectedDeliveryDate) {
-    this.expectedDeliveryDate = addWorkingDays(new Date(), 7);
-    this.status = 'in-progress'; // ✅ auto-advance status on payment
-  }
-
   next();
 });
 
 /**
+ * Calculate total price for a new order.
+ * Call this explicitly in the controller before Order.create(),
+ * so the value stored in the DB exactly matches what Paystack charges.
+ *
+ * @param {object} style       - style sub-document
+ * @param {object} material    - material sub-document
+ * @param {object} measurementRequest - { requested, fee }
+ * @returns {number} total in Naira
+ */
+export function calculateOrderTotal(style, material, measurementRequest = {}) {
+  const stylePrice           = parseFloat(style?.price)           || 0;
+  const materialPricePerYard = parseFloat(material?.pricePerYard) || 0;
+  const yardsRequired        = parseFloat(style?.yardsRequired)   || 0;
+  const measurementFee       = measurementRequest?.requested
+                                 ? (measurementRequest.fee || 1500)
+                                 : 0;
+
+  const total = stylePrice + (materialPricePerYard * yardsRequired) + measurementFee;
+  return isNaN(total) ? 0 : total;
+}
+
+/**
  * Add N working days (Mon–Fri) to a date, skipping weekends.
  */
-function addWorkingDays(startDate, days) {
+export function addWorkingDays(startDate, days) {
   const date = new Date(startDate);
   let added = 0;
   while (added < days) {
     date.setDate(date.getDate() + 1);
     const day = date.getDay();
-    if (day !== 0 && day !== 6) added++; // skip Sunday (0) and Saturday (6)
+    if (day !== 0 && day !== 6) added++;
   }
   return date;
 }

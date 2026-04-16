@@ -25,6 +25,13 @@ const userSchema = new mongoose.Schema({
     trim: true,
     match: [/.+@.+\..+/, 'Please enter a valid email address'],
   },
+  pushSubscriptions: [
+  {
+    subscription: { type: Object },
+    deviceHint: { type: String }, // optional: UA string for debugging
+    createdAt: { type: Date, default: Date.now }
+  }
+],
   password: {
     type: String,
     required: [true, 'Password is required'],
@@ -35,7 +42,6 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  pushSubscription: { type: Object, default: null },
   emailToken: String,
   emailTokenExpires: Date,
   resetToken: String,

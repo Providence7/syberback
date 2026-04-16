@@ -6,7 +6,7 @@ import {
     createOrder,
     getUserOrders,
     getOrderById, // User-specific get by ID
-    payForOrder, // <-- NEW: Import the new controller function
+    // payForOrder, // <-- NEW: Import the new controller function
 
     // Admin-specific functions
     getAdminOrders,
@@ -30,6 +30,6 @@ router.get('/:orderId', protect, getOrderById);
 
 
 // --- NEW ROUTE: Pay for an existing order ---
-router.post('/:orderId/pay', protect, payForOrder); // Ensure this is unique and doesn't conflict with others
+// router.post('/:orderId/pay', protect, payForOrder); // Ensure this is unique and doesn't conflict with others
 
 export default router;
