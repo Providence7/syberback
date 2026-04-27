@@ -12,11 +12,7 @@ const inPersonOrderSchema = new mongoose.Schema({
   address: { type: String, required: true },
   date: { type: Date, required: true }, // <-- IMPORTANT: Changed from String to Date
   time: { type: String, required: true }, // Still String for time slot (e.g., "10:00 AM")
-  status: { // <-- NEW FIELD: Added status for managing order lifecycle
-    type: String,
-    enum: ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled'],
-    default: 'pending',
-  },
+
   notes: { type: String }, // <-- NEW FIELD: For general notes on the in-person order
 }, { timestamps: true });
 

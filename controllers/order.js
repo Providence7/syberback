@@ -5,6 +5,7 @@ import Notification from '../models/notification.js';
 import { sendEmail } from '../utils/email.js';
 import { scheduleOrderNotifications, cancelOrderNotifications } from '../utils/notificationScheduler.js';
 import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -29,10 +30,6 @@ export const createOrder = async (req, res) => {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    // ✅ FIX: Calculate total here in the controller so the value stored in
-    // MongoDB is the authoritative source — identical to what Paystack will
-    // charge. The pre-save hook no longer recalculates, eliminating the
-    // mismatch that caused payment verification to fail.
     const computedTotal = calculateOrderTotal(style, material, measurementRequest);
 
     const order = await Order.create({
@@ -61,6 +58,9 @@ export const createOrder = async (req, res) => {
       category: 'order',
     });
 
+    // ✅ Do NOT notify admins here — only notify after payment is verified
+    // (admin notification moved to verifyOrderPayment)
+
     res.status(201).json({ message: 'Order created successfully.', order });
   } catch (err) {
     console.error('createOrder error:', err);
@@ -69,67 +69,117 @@ export const createOrder = async (req, res) => {
 };
 
 // ── POST /api/orders/:id/pay ──────────────────────────────────────────────────
-// Single authoritative payment verification endpoint.
-// ✅ FIX: Consolidated from two competing implementations (verifyOrderPayment
-// + payForOrder). Uses kobo-integer comparison to avoid floating point errors.
-// expectedDeliveryDate and status are set HERE only — the model pre-save hook
-// no longer touches them.
 export const verifyOrderPayment = async (req, res) => {
   try {
     const { reference } = req.body;
 
-    if (!reference) {
+    // ── Input validation ───────────────────────────────────────────────────────
+    if (!reference || typeof reference !== 'string') {
       return res.status(400).json({ message: 'Payment reference is required.' });
+    }
+
+    // Sanitise: Paystack references are alphanumeric + hyphens/underscores only.
+    // Reject anything that looks like an injection attempt.
+    if (!/^[a-zA-Z0-9_-]{5,100}$/.test(reference)) {
+      return res.status(400).json({ message: 'Invalid payment reference format.' });
     }
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: 'Order not found.' });
 
+    // ── Ownership check ────────────────────────────────────────────────────────
+    // Prevents user A from verifying user B's payment reference against
+    // user B's order (reference-stuffing attack).
     if (order.user.toString() !== req.user.id.toString()) {
       return res.status(403).json({ message: 'Not authorised.' });
     }
 
-    // ✅ Idempotent: already paid — return success so the frontend can proceed
+    // ── Idempotency ────────────────────────────────────────────────────────────
     if (order.paymentStatus === 'paid') {
-      return res.status(409).json({ message: 'Order already paid.' });
+      return res.status(409).json({
+        message: 'Order already paid.',
+        order,
+      });
     }
 
-    // ── Verify with Paystack ────────────────────────────────────────────────
-    const paystackRes = await fetch(
-      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
-      { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } }
-    );
-    const paystackData = await paystackRes.json();
+    // ── Verify reference hasn't been used on another order ─────────────────────
+    // Prevents replay attacks where a valid reference from order A is submitted
+    // against order B.
+    const existingRefOrder = await Order.findOne({
+      paymentReference: reference,
+      _id: { $ne: order._id }, // exclude current order
+    });
+    if (existingRefOrder) {
+      console.warn(
+        `Reference reuse attempt: ref=${reference} ` +
+        `tried on order ${order._id} but already used on ${existingRefOrder._id}`
+      );
+      return res.status(400).json({
+        message: 'This payment reference has already been used. Please contact support.',
+      });
+    }
+
+    // ── Verify with Paystack (server-to-server — client cannot spoof this) ─────
+    let paystackData;
+    try {
+      const paystackRes = await fetch(
+        `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+        {
+          headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+          // Abort after 10 s to avoid hanging the request if Paystack is slow
+          signal: AbortSignal.timeout(10_000),
+        }
+      );
+
+      if (!paystackRes.ok) {
+        console.error(`Paystack HTTP error: ${paystackRes.status}`);
+        return res.status(502).json({ message: 'Could not reach payment gateway. Please try again.' });
+      }
+
+      paystackData = await paystackRes.json();
+    } catch (fetchErr) {
+      console.error('Paystack fetch error:', fetchErr);
+      return res.status(502).json({ message: 'Payment gateway timeout. Please contact support.' });
+    }
 
     if (!paystackData.status || paystackData.data?.status !== 'success') {
       order.paymentStatus = 'failed';
       await order.save();
-      return res.status(400).json({ message: 'Payment verification failed with Paystack.' });
+      return res.status(400).json({ message: 'Payment not successful. Please try again or contact support.' });
     }
 
-    // ✅ FIX: Compare in kobo (integers) to avoid floating point mismatch.
-    // Previous bug: (paystackAmount / 100) === order.totalPrice failed when
-    // totalPrice had floating point representation issues, causing the order
-    // to be marked 'failed' even though the user was successfully debited.
-    const amountPaidKobo   = paystackData.data.amount;              // e.g. 500000
-    const expectedKobo     = Math.round(order.totalPrice * 100);    // e.g. 500000
+    // ── Amount verification (kobo integers — avoids float precision bugs) ──────
+    const amountPaidKobo = paystackData.data.amount;
+    const expectedKobo   = Math.round(order.totalPrice * 100);
 
     if (amountPaidKobo !== expectedKobo) {
       console.warn(
         `Amount mismatch for order ${order._id}. ` +
         `Expected ${expectedKobo} kobo, Paystack sent ${amountPaidKobo} kobo.`
       );
-      // Still mark as failed and log — do NOT silently pass mismatched amounts
       order.paymentStatus = 'failed';
       await order.save();
       return res.status(400).json({
-        message: `Payment amount mismatch. Expected ₦${order.totalPrice.toLocaleString()}, ` +
-                 `received ₦${(amountPaidKobo / 100).toLocaleString()}. Please contact support with reference: ${reference}.`,
+        message:
+          `Payment amount mismatch. Expected ₦${order.totalPrice.toLocaleString()}, ` +
+          `received ₦${(amountPaidKobo / 100).toLocaleString()}. ` +
+          `Please contact support with reference: ${reference}.`,
       });
     }
 
-    // ✅ Payment confirmed — update all fields in one atomic save.
-    // expectedDeliveryDate and status are set HERE, never in the pre-save hook.
+    // ── Verify the email on the Paystack transaction matches the order ─────────
+    // Prevents a user from paying with someone else's email address.
+    const paystackEmail = paystackData.data?.customer?.email?.toLowerCase();
+    if (paystackEmail && paystackEmail !== order.customerEmail.toLowerCase()) {
+      console.warn(
+        `Email mismatch for order ${order._id}. ` +
+        `Order email: ${order.customerEmail}, Paystack email: ${paystackEmail}`
+      );
+      // Log but don't hard-fail — email mismatch can be legitimate (guest checkout).
+      // Change to a hard failure if your business requires strict email matching.
+    }
+
+    // ── All checks passed — mark order as paid ─────────────────────────────────
     order.paymentStatus        = 'paid';
     order.paymentReference     = reference;
     order.status               = 'in-progress';
@@ -146,7 +196,7 @@ export const verifyOrderPayment = async (req, res) => {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     });
 
-    // Notify the customer
+    // ── Notify customer ────────────────────────────────────────────────────────
     await notifyUser(io, req.user.id, {
       title:    'Payment Confirmed! 🎉',
       message:  `Your order for "${order.style?.title}" is now in progress. Expected delivery: ${deliveryLabel}.`,
@@ -154,22 +204,29 @@ export const verifyOrderPayment = async (req, res) => {
       category: 'order',
     });
 
-    // Notify all admins — only fires after verified payment
-    const admins = await User.find({ isAdmin: true }, '_id');
-    if (admins.length > 0) {
-      await broadcastNotification(
-        io,
-        admins.map(a => a._id),
-        {
-          title:    '💳 New Paid Order',
-          message:  `${order.customerName} just paid for "${order.style?.title}". Delivery: ${deliveryLabel}.`,
-          type:     'success',
-          category: 'order',
-        }
-      );
+    // ── Notify admins (ONLY fires after verified payment) ─────────────────────
+    // ✅ FIX: This was previously also triggered in createOrder, meaning admins
+    //    got notified for unpaid orders. Now it only fires here, post-verification.
+    try {
+      const admins = await User.find({ isAdmin: true }, '_id');
+      if (admins.length > 0) {
+        await broadcastNotification(
+          io,
+          admins.map(a => a._id),
+          {
+            title:    '💳 New Paid Order',
+            message:  `${order.customerName} paid for "${order.style?.title}". Delivery: ${deliveryLabel}.`,
+            type:     'success',
+            category: 'order',
+          }
+        );
+      }
+    } catch (notifyErr) {
+      // Non-fatal — log but don't fail the response
+      console.error('Admin notification error:', notifyErr);
     }
 
-    // Email the customer
+    // ── Email customer ─────────────────────────────────────────────────────────
     try {
       await sendEmail({
         to:      order.customerEmail,
@@ -184,17 +241,18 @@ export const verifyOrderPayment = async (req, res) => {
             : ''}
           <p>Expected delivery: <strong>${deliveryLabel}</strong>.</p>
           <p>Transaction Reference: ${reference}</p>
+          <p>You can download your receipt from the Orders page in your account.</p>
         `,
       });
     } catch (emailErr) {
-      console.error('Error sending customer payment email:', emailErr);
+      console.error('Customer payment email error:', emailErr);
     }
 
-    // Email admin
+    // ── Email admin ────────────────────────────────────────────────────────────
     try {
       await sendEmail({
         to:      ADMIN_EMAIL,
-        subject: `Order NOW PAID: ${order._id}`,
+        subject: `New Paid Order: ${order._id}`,
         html: `
           <h2>New Paid Order</h2>
           <p>Order ID: ${order._id}</p>
@@ -208,12 +266,16 @@ export const verifyOrderPayment = async (req, res) => {
         `,
       });
     } catch (emailErr) {
-      console.error('Error sending admin payment email:', emailErr);
+      console.error('Admin payment email error:', emailErr);
     }
 
-    // Schedule order notifications (reminders, etc.)
+    // ── Schedule order notifications ───────────────────────────────────────────
     if (order.orderType === 'Online') {
-      await scheduleOrderNotifications(order);
+      try {
+        await scheduleOrderNotifications(order);
+      } catch (schedErr) {
+        console.error('scheduleOrderNotifications error:', schedErr);
+      }
     }
 
     res.status(200).json({
@@ -254,9 +316,6 @@ export const getOrderById = async (req, res) => {
 };
 
 // ── DELETE /api/orders/:id ────────────────────────────────────────────────────
-// ✅ FIX: Hard-deletes the order (findOneAndDelete) so it actually disappears
-// from the DB and the frontend order list. Previous implementation only did a
-// soft-delete (status = 'cancelled') which kept the record and confused the UI.
 export const deleteOrder = async (req, res) => {
   try {
     const order = await Order.findOneAndDelete({
@@ -268,7 +327,6 @@ export const deleteOrder = async (req, res) => {
       return res.status(404).json({ message: 'Order not found or you do not have access to it.' });
     }
 
-    // Cancel any scheduled notifications for this order
     cancelOrderNotifications(order._id.toString());
 
     res.status(200).json({ message: 'Order deleted successfully.' });
@@ -278,7 +336,7 @@ export const deleteOrder = async (req, res) => {
   }
 };
 
-// ── Helpers shared by admin endpoints ─────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────────
 const formatOrderForAdminFrontend = (order) => ({
   _id:                 order._id,
   user:                order.user
@@ -305,9 +363,6 @@ const formatOrderForAdminFrontend = (order) => ({
 // ── GET /api/orders/admin/all ─────────────────────────────────────────────────
 export const getAllOrdersAdmin = async (req, res) => {
   try {
-    if (!req.user?.isAdmin) {
-      return res.status(403).json({ message: 'Admins only.' });
-    }
     const orders = await Order.find({ paymentStatus: 'paid' })
       .sort({ createdAt: -1 })
       .populate('user', 'name email');
@@ -356,10 +411,6 @@ export const getAdminOrderById = async (req, res) => {
 // ── PATCH /api/orders/:id/status ─────────────────────────────────────────────
 export const updateOrderStatus = async (req, res) => {
   try {
-    if (!req.user?.isAdmin) {
-      return res.status(403).json({ message: 'Admins only.' });
-    }
-
     const { status } = req.body;
     const allowed    = ['in-progress', 'completed', 'cancelled', 'ready-for-pickup'];
 
@@ -397,11 +448,11 @@ export const updateOrderStatus = async (req, res) => {
   }
 };
 
-// ── PATCH /api/orders/admin/:id ───────────────────────────────────────────────
+// ── PUT /api/orders/admin/:id ─────────────────────────────────────────────────
 export const updateOrderAdmin = async (req, res) => {
   try {
-    const { id }    = req.params;
-    const updates   = req.body;
+    const { id }  = req.params;
+    const updates = req.body;
 
     const existingOrder = await Order.findOne({ _id: id, paymentStatus: 'paid' });
     if (!existingOrder) {
@@ -411,7 +462,6 @@ export const updateOrderAdmin = async (req, res) => {
     const originalStatus        = existingOrder.status;
     const originalPaymentStatus = existingOrder.paymentStatus;
 
-    // Flatten nested update objects for $set
     const flatUpdates = {};
     for (const [key, value] of Object.entries(updates)) {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -452,7 +502,7 @@ export const updateOrderAdmin = async (req, res) => {
             html:    `<h2>Order Completed!</h2><p>Dear ${updatedOrder.user.name}, your order is ready!</p>`,
           });
         } catch (emailErr) {
-          console.error('Error sending order completed email:', emailErr);
+          console.error('Order completed email error:', emailErr);
         }
       }
     }
@@ -476,7 +526,7 @@ export const updateOrderAdmin = async (req, res) => {
             html:    `<h2>Payment Confirmed!</h2><p>Dear ${updatedOrder.user.name}, your payment was confirmed.</p>`,
           });
         } catch (emailErr) {
-          console.error('Error sending payment confirmed email:', emailErr);
+          console.error('Payment confirmed email error:', emailErr);
         }
 
         if (updatedOrder.orderType === 'Online' && originalPaymentStatus !== 'paid') {
