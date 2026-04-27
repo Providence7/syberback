@@ -1,11 +1,10 @@
-// src/controllers/orderController.js
+// src/controllers/order.js
 import Order, { calculateOrderTotal, addWorkingDays } from '../models/order.js';
 import User from '../models/user.js';
 import Notification from '../models/notification.js';
 import { sendEmail } from '../utils/email.js';
 import { scheduleOrderNotifications, cancelOrderNotifications } from '../utils/notificationScheduler.js';
 import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js';
-import crypto from 'crypto';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -15,9 +14,13 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 export const createOrder = async (req, res) => {
   try {
     const {
-      style, material, measurements, notes,
+      style,
+      material,
+      measurements,
+      notes,
       paymentChannel,
-      measurementRequested, requestedSize,
+      measurementRequested,
+      requestedSize,
       measurementRequest,
     } = req.body;
 
@@ -41,16 +44,20 @@ export const createOrder = async (req, res) => {
       measurements:  measurements || null,
       notes:         notes        || '',
       totalPrice:    computedTotal,
+      // FIX: set orderType so scheduleOrderNotifications condition works correctly
+      orderType:     'Online',
       paymentChannel: paymentChannel || 'card',
       measurementRequest: measurementRequest || { requested: false, fee: 1500, paid: false },
       measurementRequested: !!measurementRequested,
-      requestedSize:  requestedSize || null,
-      status:         'pendingPayment',
-      paymentStatus:  'unpaid',
+      requestedSize: requestedSize || null,
+      status:        'pendingPayment',
+      paymentStatus: 'unpaid',
       expectedDeliveryDate: null,
     });
 
     const io = req.app.get('io');
+
+    // Notify customer that order was created — they still need to pay
     await notifyUser(io, req.user.id, {
       title:    'Order Created',
       message:  `Your order for "${style.title}" has been placed. Complete payment to confirm it.`,
@@ -58,8 +65,8 @@ export const createOrder = async (req, res) => {
       category: 'order',
     });
 
-    // ✅ Do NOT notify admins here — only notify after payment is verified
-    // (admin notification moved to verifyOrderPayment)
+    // ✅ Do NOT notify admins here — only after payment is verified.
+    //    (Admins are notified inside verifyOrderPayment once Paystack confirms.)
 
     res.status(201).json({ message: 'Order created successfully.', order });
   } catch (err) {
@@ -78,7 +85,7 @@ export const verifyOrderPayment = async (req, res) => {
       return res.status(400).json({ message: 'Payment reference is required.' });
     }
 
-    // Sanitise: Paystack references are alphanumeric + hyphens/underscores only.
+    // Paystack references are alphanumeric + hyphens/underscores only.
     // Reject anything that looks like an injection attempt.
     if (!/^[a-zA-Z0-9_-]{5,100}$/.test(reference)) {
       return res.status(400).json({ message: 'Invalid payment reference format.' });
@@ -96,18 +103,14 @@ export const verifyOrderPayment = async (req, res) => {
 
     // ── Idempotency ────────────────────────────────────────────────────────────
     if (order.paymentStatus === 'paid') {
-      return res.status(409).json({
-        message: 'Order already paid.',
-        order,
-      });
+      return res.status(409).json({ message: 'Order already paid.', order });
     }
 
-    // ── Verify reference hasn't been used on another order ─────────────────────
-    // Prevents replay attacks where a valid reference from order A is submitted
-    // against order B.
+    // ── Prevent reference reuse across orders ──────────────────────────────────
+    // Stops a valid reference from order A being replayed against order B.
     const existingRefOrder = await Order.findOne({
       paymentReference: reference,
-      _id: { $ne: order._id }, // exclude current order
+      _id: { $ne: order._id },
     });
     if (existingRefOrder) {
       console.warn(
@@ -126,8 +129,7 @@ export const verifyOrderPayment = async (req, res) => {
         `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
         {
           headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
-          // Abort after 10 s to avoid hanging the request if Paystack is slow
-          signal: AbortSignal.timeout(10_000),
+          signal:  AbortSignal.timeout(10_000),
         }
       );
 
@@ -145,7 +147,9 @@ export const verifyOrderPayment = async (req, res) => {
     if (!paystackData.status || paystackData.data?.status !== 'success') {
       order.paymentStatus = 'failed';
       await order.save();
-      return res.status(400).json({ message: 'Payment not successful. Please try again or contact support.' });
+      return res.status(400).json({
+        message: 'Payment not successful. Please try again or contact support.',
+      });
     }
 
     // ── Amount verification (kobo integers — avoids float precision bugs) ──────
@@ -167,16 +171,14 @@ export const verifyOrderPayment = async (req, res) => {
       });
     }
 
-    // ── Verify the email on the Paystack transaction matches the order ─────────
-    // Prevents a user from paying with someone else's email address.
+    // ── Email mismatch: log but don't hard-fail ────────────────────────────────
+    // (Can be made a hard failure if your business requires strict email matching)
     const paystackEmail = paystackData.data?.customer?.email?.toLowerCase();
     if (paystackEmail && paystackEmail !== order.customerEmail.toLowerCase()) {
       console.warn(
         `Email mismatch for order ${order._id}. ` +
         `Order email: ${order.customerEmail}, Paystack email: ${paystackEmail}`
       );
-      // Log but don't hard-fail — email mismatch can be legitimate (guest checkout).
-      // Change to a hard failure if your business requires strict email matching.
     }
 
     // ── All checks passed — mark order as paid ─────────────────────────────────
@@ -204,9 +206,9 @@ export const verifyOrderPayment = async (req, res) => {
       category: 'order',
     });
 
-    // ── Notify admins (ONLY fires after verified payment) ─────────────────────
-    // ✅ FIX: This was previously also triggered in createOrder, meaning admins
-    //    got notified for unpaid orders. Now it only fires here, post-verification.
+    // ── Notify admins (ONLY fires here — after verified payment) ──────────────
+    // ✅ This is intentionally NOT in createOrder. Admins are only notified
+    //    once Paystack server-to-server verification succeeds.
     try {
       const admins = await User.find({ isAdmin: true }, '_id');
       if (admins.length > 0) {
@@ -222,7 +224,7 @@ export const verifyOrderPayment = async (req, res) => {
         );
       }
     } catch (notifyErr) {
-      // Non-fatal — log but don't fail the response
+      // Non-fatal — log but don't fail the payment response
       console.error('Admin notification error:', notifyErr);
     }
 
@@ -270,6 +272,8 @@ export const verifyOrderPayment = async (req, res) => {
     }
 
     // ── Schedule order notifications ───────────────────────────────────────────
+    // FIX: was 'Online' (capital O) but orderType is now consistently set to
+    // 'Online' in createOrder, so this condition now works correctly.
     if (order.orderType === 'Online') {
       try {
         await scheduleOrderNotifications(order);
@@ -338,25 +342,25 @@ export const deleteOrder = async (req, res) => {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const formatOrderForAdminFrontend = (order) => ({
-  _id:                 order._id,
-  user:                order.user
-                         ? { _id: order.user._id, name: order.user.name, email: order.user.email }
-                         : null,
-  customerName:        order.customerName,
-  customerEmail:       order.customerEmail,
-  orderType:           order.orderType,
-  status:              order.status,
-  paymentStatus:       order.paymentStatus,
-  totalPrice:          order.totalPrice,
-  date:                order.createdAt.toISOString().split('T')[0],
-  notes:               order.notes,
-  style:               order.style,
-  material:            order.material,
-  measurements:        order.measurements,
-  measurementRequest:  order.measurementRequest,
-  paymentReference:    order.paymentReference,
-  createdAt:           order.createdAt,
-  updatedAt:           order.updatedAt,
+  _id:                  order._id,
+  user:                 order.user
+                          ? { _id: order.user._id, name: order.user.name, email: order.user.email }
+                          : null,
+  customerName:         order.customerName,
+  customerEmail:        order.customerEmail,
+  orderType:            order.orderType,
+  status:               order.status,
+  paymentStatus:        order.paymentStatus,
+  totalPrice:           order.totalPrice,
+  date:                 order.createdAt.toISOString().split('T')[0],
+  notes:                order.notes,
+  style:                order.style,
+  material:             order.material,
+  measurements:         order.measurements,
+  measurementRequest:   order.measurementRequest,
+  paymentReference:     order.paymentReference,
+  createdAt:            order.createdAt,
+  updatedAt:            order.updatedAt,
   expectedDeliveryDate: order.expectedDeliveryDate,
 });
 
@@ -430,10 +434,10 @@ export const updateOrderStatus = async (req, res) => {
 
     const io = req.app.get('io');
     const statusMessages = {
-      'completed':        { title: 'Order Delivered! 🎉',   message: `Your order for "${order.style?.title}" has been delivered. Thank you!`,          type: 'success' },
-      'ready-for-pickup': { title: 'Ready for Pickup! 📦',  message: `Your order for "${order.style?.title}" is ready for pickup.`,                    type: 'info'    },
-      'cancelled':        { title: 'Order Cancelled',        message: `Your order for "${order.style?.title}" has been cancelled. Contact us for info.`, type: 'error'   },
-      'in-progress':      { title: 'Order In Progress',      message: `Your order for "${order.style?.title}" is now being worked on.`,                  type: 'info'    },
+      'completed':        { title: 'Order Delivered! 🎉',  message: `Your order for "${order.style?.title}" has been delivered. Thank you!`,           type: 'success' },
+      'ready-for-pickup': { title: 'Ready for Pickup! 📦', message: `Your order for "${order.style?.title}" is ready for pickup.`,                     type: 'info'    },
+      'cancelled':        { title: 'Order Cancelled',       message: `Your order for "${order.style?.title}" has been cancelled. Contact us for info.`,  type: 'error'   },
+      'in-progress':      { title: 'Order In Progress',     message: `Your order for "${order.style?.title}" is now being worked on.`,                   type: 'info'    },
     };
 
     const notifPayload = statusMessages[status];
@@ -462,6 +466,7 @@ export const updateOrderAdmin = async (req, res) => {
     const originalStatus        = existingOrder.status;
     const originalPaymentStatus = existingOrder.paymentStatus;
 
+    // Flatten nested updates so Mongoose $set works correctly on sub-documents
     const flatUpdates = {};
     for (const [key, value] of Object.entries(updates)) {
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
