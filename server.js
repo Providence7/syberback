@@ -5,10 +5,8 @@ import cors from 'cors';
 import http from 'http';
 import connectDB from "./config/db.js";
 
-// Security Middleware
 import * as security from './middlewares/security.js'; 
 
-// Route Imports
 import authRoutes from './routes/authRoutes.js';
 import measurementRoutes from './routes/measurement.js';
 import inpersonRoute from './routes/inpersonRoutes.js';
@@ -21,15 +19,14 @@ import { initSocket } from './services/socket.js';
 
 dotenv.config();
 const app = express();
-
-// 1. Setup Environment
+app.use(cookieParser());
 app.set('trust proxy', 1);
 
-// 2. Global Security Headers
+// A. SECURITY HEADERS & GLOBAL RATE LIMIT
 app.use(security.securityHeaders);
 app.use(security.generalRateLimiter);
 
-// 3. CORS (Allowing your frontend and the CSRF header)
+// B. CORS
 app.use(cors({
   origin: process.env.CLIENT_URL,
   credentials: true,
@@ -37,7 +34,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'], 
 }));
 
-// 4. Webhook Handling (Raw body required)
+// C. WEBHOOK HANDLING (MUST BE BEFORE express.json())
 app.post('/api/webhooks/paystack', 
   express.raw({ type: 'application/json' }), 
   (req, res, next) => { req.rawBody = req.body; next(); },
@@ -45,46 +42,41 @@ app.post('/api/webhooks/paystack',
   (req, res) => res.status(200).send('Webhook verified')
 );
 
-// 5. Parsers & Sanitization
+// D. PARSERS (MUST BE BEFORE SANITIZATION)
 app.use(express.json());
-app.use(cookieParser());
+app.use(express.urlencoded({ extended: true }));
+
+
+// E. SANITIZATION (Now works without TypeError)
 app.use(security.sanitizeMongo);
 app.use(security.sanitizeHpp);
 
-// 6. Security Token Endpoint
 app.get('/api/csrf-token', security.issueCsrfToken);
-
 app.get('/', (req, res) => res.send("✅ SyberTailor backend is running!"));
 
-// 7. Route Logic
-// ---------------------------------------------------------
-
-// Auth - with specific rate limiter
+// F. AUTH ROUTES
 app.use('/api/auth', security.authRateLimiter, authRoutes);
 
-// Protected Business Routes - Require CSRF + Origin Check
-// These handle measurements, money, and custom styles
+// G. PROTECTED BUSINESS ROUTES
 const protectedRoutes = [
   '/api/measurements',
   '/api/order',
   '/api/orders',
-  '/api/styles',
-  '/api/fabrics'
 ];
+
+// Combine Origin Check + CSRF Protection
 app.use(protectedRoutes, security.strictOriginCheck, security.csrfProtection);
 
-// Map the Routers
+// Map Routers
 app.use('/api/measurements', measurementRoutes);
 app.use('/api/order', inpersonRoute);
 app.use('/api/orders', orderRoutes);
-app.use('/api/styles', styleRoutes);
-app.use('/api/fabrics', fabricRoutes);
 
-// General/Public Routes
+// H. GENERAL/PUBLIC ROUTES
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/currency', currencyRoutes);
-
-// ---------------------------------------------------------
+app.use('/api/styles', styleRoutes);
+app.use('/api/fabrics', fabricRoutes);
 
 connectDB();
 
