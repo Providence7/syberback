@@ -8,7 +8,6 @@ const notificationSchema = new mongoose.Schema(
     title:   { type: String, required: true },
     message: { type: String, required: true },
 
-    // All type values used across the orderController:
     type: {
       type: String,
       enum: [
@@ -16,6 +15,8 @@ const notificationSchema = new mongoose.Schema(
         'payment_success',       // payment verified successfully
         'payment_failed',        // payment verification failed
         'payment_status_update', // admin manually updated payment status
+        'order_progress',        // daily progress update (material ready, cut, sewn, etc.)
+        'delivery_imminent',     // day 6 — delivery tomorrow notification
         'info',                  // generic informational
         'success',               // generic success
         'warning',               // generic warning
