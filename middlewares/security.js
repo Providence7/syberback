@@ -1,12 +1,9 @@
 /**
  * src/middlewares/security.js
- *
- * Full updated version for latest csrf-csrf package
  */
 
 import rateLimit from 'express-rate-limit';
 import hpp from 'hpp';
-import { doubleCsrf } from 'csrf-csrf';
 import crypto from 'crypto';
 
 // ─────────────────────────────────────────────
@@ -30,14 +27,8 @@ export function securityHeaders(req, res, next) {
 
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader(
-    'Referrer-Policy',
-    'strict-origin-when-cross-origin'
-  );
-  res.setHeader(
-    'Permissions-Policy',
-    'camera=(), microphone=(), geolocation=()'
-  );
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
   if (process.env.NODE_ENV === 'production') {
     res.setHeader(
@@ -50,97 +41,25 @@ export function securityHeaders(req, res, next) {
 }
 
 // ─────────────────────────────────────────────
-// 2. CSRF Protection (LATEST VERSION)
+// 2. Rate Limiters
 // ─────────────────────────────────────────────
-
-const isProd =
-  process.env.NODE_ENV === 'production';
-
-const {
-  generateCsrfToken,
-  doubleCsrfProtection,
-  invalidCsrfTokenError,
-} = doubleCsrf({
-  // required
-  getSecret: () => process.env.CSRF_SECRET,
-
-  // NEW required option in latest package
-  getSessionIdentifier: (req) =>
-    req.user?.id || req.ip,
-
-  // localhost friendly cookie
-  cookieName: 'csrf-token',
-
-  cookieOptions: {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? 'none' : 'lax',
-    path: '/',
-  },
-
-  size: 64,
-
-  ignoredMethods: ['GET', 'HEAD', 'OPTIONS'],
-
-  getTokenFromRequest: (req) =>
-    req.headers['x-csrf-token'],
+export const paymentRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many payment attempts. Try again later.' },
+  keyGenerator: (req) => req.ip,
+  skip: (req) => req.path.includes('/webhooks/'),
 });
 
-export {
-  doubleCsrfProtection as csrfProtection,
-};
-
-export { invalidCsrfTokenError };
-
-// GET /api/csrf-token
-export function issueCsrfToken(
-  req,
-  res,
-  next
-) {
-  try {
-    const token = generateCsrfToken(
-      req,
-      res
-    );
-
-    res.json({ token });
-  } catch (error) {
-    next(error);
-  }
-}
-
-// ─────────────────────────────────────────────
-// 3. Rate Limiters
-// ─────────────────────────────────────────────
-
-export const paymentRateLimiter =
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-      message:
-        'Too many payment attempts. Try again later.',
-    },
-    keyGenerator: (req) => req.ip,
-    skip: (req) =>
-      req.path.includes('/webhooks/'),
-  });
-
-export const generalRateLimiter =
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 200,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-      message:
-        'Too many requests. Please slow down.',
-    },
-  });
-
+export const generalRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests. Please slow down.' },
+});
 
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -150,42 +69,22 @@ export const authRateLimiter = rateLimit({
 });
 
 // ─────────────────────────────────────────────
-// 4. Strict Origin Check
+// 3. Strict Origin Check
 // ─────────────────────────────────────────────
+export function strictOriginCheck(req, res, next) {
+  const mutatingMethods = ['POST', 'PUT', 'PATCH', 'DELETE'];
 
-export function strictOriginCheck(
-  req,
-  res,
-  next
-) {
-  const mutatingMethods = [
-    'POST',
-    'PUT',
-    'PATCH',
-    'DELETE',
-  ];
-
-  if (
-    !mutatingMethods.includes(req.method)
-  ) {
+  if (!mutatingMethods.includes(req.method)) {
     return next();
   }
 
-  const origin =
-    req.headers.origin || '';
-  const referer =
-    req.headers.referer || '';
+  const origin = req.headers.origin || '';
 
-  const noOrigin =
-    !origin || origin === 'null';
-
-  if (noOrigin) {
+  if (!origin || origin === 'null') {
     return next();
   }
 
-  const allowedOrigins = (
-    process.env.CLIENT_URL || ''
-  )
+  const allowedOrigins = (process.env.CLIENT_URL || '')
     .split(',')
     .map((url) => url.trim())
     .filter(Boolean);
@@ -194,35 +93,24 @@ export function strictOriginCheck(
     return next();
   }
 
-  const source = origin || referer;
-
-  const allowed =
-    allowedOrigins.some((url) =>
-      source.startsWith(url)
-    );
+  const allowed = allowedOrigins.some((url) => origin.startsWith(url));
 
   if (!allowed) {
-    return res.status(403).json({
-      message: 'Forbidden.',
-    });
+    return res.status(403).json({ message: 'Forbidden.' });
   }
 
   next();
 }
 
 // ─────────────────────────────────────────────
-// 5. Mongo Sanitizer
+// 4. Mongo Sanitizer
 // ─────────────────────────────────────────────
-
 function sanitizeValue(value) {
   if (Array.isArray(value)) {
     return value.map(sanitizeValue);
   }
 
-  if (
-    value &&
-    typeof value === 'object'
-  ) {
+  if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
         .filter(
@@ -231,73 +119,38 @@ function sanitizeValue(value) {
             key !== '__proto__' &&
             key !== 'constructor'
         )
-        .map(([key, val]) => [
-          key,
-          sanitizeValue(val),
-        ])
+        .map(([key, val]) => [key, sanitizeValue(val)])
     );
   }
 
   return value;
 }
 
-export function sanitizeMongo(
-  req,
-  res,
-  next
-) {
-  if (req.body) {
-    req.body = sanitizeValue(
-      req.body
-    );
-  }
-
-  if (req.params) {
-    req.params = sanitizeValue(
-      req.params
-    );
-  }
-
+export function sanitizeMongo(req, res, next) {
+  if (req.body)   req.body   = sanitizeValue(req.body);
+  if (req.params) req.params = sanitizeValue(req.params);
   next();
 }
 
 export const sanitizeHpp = hpp();
 
 // ─────────────────────────────────────────────
-// 6. Paystack Webhook Verify
+// 5. Paystack Webhook Verify
 // ─────────────────────────────────────────────
-
-export function verifyPaystackWebhook(
-  req,
-  res,
-  next
-) {
-  const signature =
-    req.headers[
-      'x-paystack-signature'
-    ];
+export function verifyPaystackWebhook(req, res, next) {
+  const signature = req.headers['x-paystack-signature'];
 
   if (!signature) {
-    return res.status(401).json({
-      message:
-        'Missing webhook signature.',
-    });
+    return res.status(401).json({ message: 'Missing webhook signature.' });
   }
 
   const hash = crypto
-    .createHmac(
-      'sha512',
-      process.env
-        .PAYSTACK_SECRET_KEY
-    )
+    .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
     .update(req.rawBody)
     .digest('hex');
 
   if (hash !== signature) {
-    return res.status(401).json({
-      message:
-        'Invalid webhook signature.',
-    });
+    return res.status(401).json({ message: 'Invalid webhook signature.' });
   }
 
   next();
