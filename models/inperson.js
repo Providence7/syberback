@@ -1,4 +1,3 @@
-// models/inperson.js
 import mongoose from 'mongoose';
 
 const inPersonOrderSchema = new mongoose.Schema({
@@ -10,10 +9,10 @@ const inPersonOrderSchema = new mongoose.Schema({
   name: { type: String, required: true },
   phone: { type: String, required: true },
   address: { type: String, required: true },
-  date: { type: Date, required: true }, // <-- IMPORTANT: Changed from String to Date
-  time: { type: String, required: true }, // Still String for time slot (e.g., "10:00 AM")
-
-  notes: { type: String }, // <-- NEW FIELD: For general notes on the in-person order
+  date: { type: Date, required: true },
+  time: { type: String, required: true },
+  serviceType: { type: String, required: true }, // ✅ NEW — garment / commission type
+  notes: { type: String },
 }, { timestamps: true });
 
 export default mongoose.models.InPersonOrder || mongoose.model('InPersonOrder', inPersonOrderSchema);
