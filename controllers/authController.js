@@ -18,11 +18,10 @@ dotenv.config();
 // ------------------------------
 const randomToken = (length = 32) => crypto.randomBytes(length).toString('hex');
 
-// ✅ Consistent secure cookie options
 const getCookieOptions = () => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production', // HTTPS-only cookies in production
-  sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', // Cross-site compatible
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
   path: '/',
 });
 
@@ -168,10 +167,9 @@ export async function refresh(req, res) {
     const user = await User.findById(payload.id);
 
     if (!user || user.refreshToken !== token) {
-   
       return res.sendStatus(403);
     }
-   console.warn('Refresh attempt: Invalid or revoked refresh token.');
+    console.warn('Refresh attempt: Invalid or revoked refresh token.');
     const newAccessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
     const newRefreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
 
@@ -184,7 +182,6 @@ export async function refresh(req, res) {
       .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
       .json({ message: 'Tokens refreshed successfully' });
 
- 
   } catch (err) {
     console.error('Refresh token error:', err.message);
     res.sendStatus(403);
@@ -258,6 +255,7 @@ export async function resetPassword(req, res) {
     res.status(500).json({ message: 'Server error during password reset.' });
   }
 }
+
 // Get Profile
 export const getProfile = async (req, res) => {
   try {
@@ -327,137 +325,136 @@ export const getUserById = async (req, res) => {
   }
 };
 
-// --- NEW DASHBOARD STATS FUNCTION ---
-
-// @desc    Get admin dashboard statistics
-// @route   GET /api/auth/admin/dashboard-stats
-// @access  Private/Admin
-// src/controllers/authController.js
-// ... (your existing imports, like User, Order, etc.)
-
-// --- NEW DASHBOARD STATS FUNCTION ---
-
-// @desc    Get admin dashboard statistics
-// @route   GET /api/auth/admin/dashboard-stats
-// @access  Private/Admin
+// ------------------------------
+// 📊 Admin Dashboard Stats
+// ------------------------------
 export const getAdminDashboardStats = async (req, res) => {
   try {
-    // Total Users
-    const users = await User.countDocuments();
+    const ACTIVITIES_LIMIT = 20;
 
-    // Total Orders
-    const orders = await Order.countDocuments();
+    // ── Scalar counts ──────────────────────────────────────
+    const users    = await User.countDocuments();
+    const orders   = await Order.countDocuments();
 
-    // Total Payments (sum of totalPrice for paid orders)
-    const paidPayments = await Order.aggregate([
+    const paidAgg  = await Order.aggregate([
       { $match: { paymentStatus: 'paid' } },
-      { $group: { _id: null, total: { $sum: '$totalPrice' } } }
+      { $group: { _id: null, total: { $sum: '$totalPrice' } } },
     ]);
-    const payments = paidPayments.length > 0 ? paidPayments[0].total : 0;
+    const payments = paidAgg[0]?.total ?? 0;
 
-    // Scheduled Orders (e.g., 'in-progress' status)
-    const scheduledOrders = await Order.countDocuments({ status: 'in-progress' });
+    const schedule = await Order.countDocuments({ status: 'in-progress' });
+    const visits   = 0; // placeholder — wire to your analytics if available
 
-    // Visits - This is typically from an external analytics tool or a custom logging system.
-    // For now, we'll keep it as a dummy value as it's not in your current models.
-    const visits = 0; // Placeholder
-
-    // Revenue Trend (e.g., last 7 days orders)
+    // ── Weekly revenue trend ───────────────────────────────
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    sevenDaysAgo.setHours(0, 0, 0, 0); // Start of the day 7 days ago
+    sevenDaysAgo.setHours(0, 0, 0, 0);
 
     const revenueTrend = await Order.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: sevenDaysAgo },
-          paymentStatus: 'paid' // Only count paid orders for revenue trend
-        }
-      },
+      { $match: { createdAt: { $gte: sevenDaysAgo }, paymentStatus: 'paid' } },
       {
         $group: {
-          _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
-          },
-          totalOrders: { $sum: 1 },
-          totalRevenue: { $sum: '$totalPrice' }
-        }
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          totalOrders:  { $sum: 1 },
+          totalRevenue: { $sum: '$totalPrice' },
+        },
       },
-      { $sort: { _id: 1 } } // Sort by date
+      { $sort: { _id: 1 } },
     ]);
 
-    // Format revenueTrend for the chart (e.g., fill in missing days)
-    const formattedRevenueTrend = [];
     const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    for (let i = 0; i < 7; i++) {
-        const d = new Date();
-        d.setDate(d.getDate() - (6 - i)); // Get date for each of last 7 days
-        const dateString = d.toISOString().split('T')[0]; // YYYY-MM-DD
-        const dayName = daysOfWeek[d.getDay()];
+    const formattedRevenueTrend = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      const dateString = d.toISOString().split('T')[0];
+      const found = revenueTrend.find(r => r._id === dateString);
+      return {
+        day:     daysOfWeek[d.getDay()],
+        date:    dateString,
+        orders:  found?.totalOrders  ?? 0,
+        revenue: found?.totalRevenue ?? 0,
+      };
+    });
 
-        const found = revenueTrend.find(item => item._id === dateString);
-        formattedRevenueTrend.push({
-            day: dayName,
-            date: dateString,
-            orders: found ? found.totalOrders : 0,
-            revenue: found ? found.totalRevenue : 0
-        });
-    }
-
-    // --- UPDATED RECENT ACTIVITIES LOGIC ---
-    const ACTIVITIES_LIMIT = 8; // Define the limit here
-
-    // Fetch recent users and orders, select necessary fields
-    // Fetch a bit more than the limit to ensure enough for combination and sorting
-    const rawRecentUsers = await User.find()
+    // ── Raw data fetches ───────────────────────────────────
+    const rawUsers = await User.find()
       .sort({ createdAt: -1 })
-      .limit(ACTIVITIES_LIMIT + 2) // Fetch a few extra
+      .limit(ACTIVITIES_LIMIT)
       .select('name createdAt');
 
-    const rawRecentOrders = await Order.find()
+    // Populate user name on orders so we can show who placed them
+    const rawOrders = await Order.find()
       .sort({ createdAt: -1 })
-      .limit(ACTIVITIES_LIMIT + 2) // Fetch a few extra
-      .select('style.title createdAt');
+      .limit(ACTIVITIES_LIMIT)
+      .populate('user', 'name')
+      .select('totalPrice status paymentStatus createdAt updatedAt user');
 
-    // Combine all events into a single array with a type and message builder
+    // ── Build combined activity list ───────────────────────
     const combinedActivities = [];
 
-    rawRecentUsers.forEach(u => {
-      if (u.createdAt && u.name) {
+    // 1. New user registrations
+    rawUsers.forEach(u => {
+      combinedActivities.push({
+        type:      'user_registered',
+        user:      u.name || 'Unknown user',
+        date:      u.createdAt,
+        sortKey:   u.createdAt,
+      });
+    });
+
+    // 2. Orders placed
+    rawOrders.forEach(o => {
+      combinedActivities.push({
+        type:    'order_placed',
+        user:    o.user?.name || null,
+        orderId: o._id.toString().slice(-6).toUpperCase(),
+        amount:  o.totalPrice ?? null,
+        date:    o.createdAt,
+        sortKey: o.createdAt,
+      });
+    });
+
+    // 3. Payments received  (paid orders — keyed off updatedAt so it feels like a separate event)
+    rawOrders
+      .filter(o => o.paymentStatus === 'paid')
+      .forEach(o => {
         combinedActivities.push({
-          type: 'user',
-          createdAt: u.createdAt,
-          message: `New user: ${u.name} joined.`,
+          type:    'payment_received',
+          user:    o.user?.name || null,
+          amount:  o.totalPrice ?? null,
+          orderId: o._id.toString().slice(-6).toUpperCase(),
+          date:    o.updatedAt || o.createdAt,
+          sortKey: o.updatedAt || o.createdAt,
         });
-      }
-    });
+      });
 
-    rawRecentOrders.forEach(o => {
-      if (o.createdAt && o.style && o.style.title) {
+    // 4. Order status changes  (any order that isn't 'pending' has had a status event)
+    rawOrders
+      .filter(o => o.status && o.status !== 'pending')
+      .forEach(o => {
         combinedActivities.push({
-          type: 'order',
-          createdAt: o.createdAt,
-          message: `New order: ${o.style.title} placed.`,
+          type:    'order_status_changed',
+          user:    o.user?.name || null,
+          orderId: o._id.toString().slice(-6).toUpperCase(),
+          status:  o.status,
+          date:    o.updatedAt || o.createdAt,
+          sortKey: o.updatedAt || o.createdAt,
         });
-      }
-    });
+      });
 
-    // Sort combined activities by createdAt in descending order
-    combinedActivities.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    // ── Sort newest-first and cap ──────────────────────────
+    combinedActivities.sort((a, b) => new Date(b.sortKey) - new Date(a.sortKey));
 
-    // Format the top N recent activities
-    const recent = combinedActivities.slice(0, ACTIVITIES_LIMIT).map(activity => {
-        // Use a more robust date formatting for the display string
-        const options = { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-        return `${activity.message} (${activity.createdAt.toLocaleString(undefined, options)})`;
-    });
+    const recent = combinedActivities
+      .slice(0, ACTIVITIES_LIMIT)
+      .map(({ sortKey, ...rest }) => rest); // strip internal sort key before sending
 
     res.status(200).json({
       users,
       payments,
       orders,
-      schedule: scheduledOrders,
-      visits, // Still a placeholder
+      schedule,
+      visits,
       recent,
       revenueTrend: formattedRevenueTrend,
     });
@@ -467,12 +464,6 @@ export const getAdminDashboardStats = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch dashboard statistics.' });
   }
 };
-// src/controllers/authController.js
-// ... (your existing imports and functions)
-
-// --- ADMIN FUNCTIONS ---
-
-// ... (existing getAllUsers, getUserById)
 
 // @desc    Update user (Admin only)
 // @route   PUT /api/auth/admin/users/:id
@@ -488,16 +479,11 @@ export const updateUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Prevent changing the current admin's own admin status via this route if not careful,
-    // or if you want to protect the super admin.
-    // For simplicity, we allow it for now, but in production, you might restrict
-    // an admin from revoking their own admin privileges.
     if (user.isAdmin && !isAdmin && user._id.toString() === req.user.id) {
-        return res.status(403).json({ message: 'Cannot revoke your own admin privileges via this route.' });
+      return res.status(403).json({ message: 'Cannot revoke your own admin privileges via this route.' });
     }
 
     user.name = name || user.name;
-    // Only update email if provided and different, and handle uniqueness
     if (email && email !== user.email) {
       const emailExists = await User.findOne({ email });
       if (emailExists && emailExists._id.toString() !== userId) {
@@ -505,9 +491,9 @@ export const updateUser = async (req, res) => {
       }
       user.email = email;
     }
-    user.phone = phone || user.phone;
-    user.address = address || user.address;
-    user.isAdmin = typeof isAdmin === 'boolean' ? isAdmin : user.isAdmin;
+    user.phone      = phone      || user.phone;
+    user.address    = address    || user.address;
+    user.isAdmin    = typeof isAdmin    === 'boolean' ? isAdmin    : user.isAdmin;
     user.isVerified = typeof isVerified === 'boolean' ? isVerified : user.isVerified;
 
     const updatedUser = await user.save();
@@ -515,23 +501,22 @@ export const updateUser = async (req, res) => {
     res.status(200).json({
       message: 'User updated successfully',
       user: {
-        _id: updatedUser._id,
-        uniqueId: updatedUser.uniqueId,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        phone: updatedUser.phone,
-        address: updatedUser.address,
-        isAdmin: updatedUser.isAdmin,
+        _id:        updatedUser._id,
+        uniqueId:   updatedUser.uniqueId,
+        name:       updatedUser.name,
+        email:      updatedUser.email,
+        phone:      updatedUser.phone,
+        address:    updatedUser.address,
+        isAdmin:    updatedUser.isAdmin,
         isVerified: updatedUser.isVerified,
       },
     });
-
   } catch (error) {
     console.error('Error updating user (Admin):', error);
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format.' });
     }
-    if (error.code === 11000) { // Duplicate key error (e.g., email)
+    if (error.code === 11000) {
       return res.status(400).json({ message: 'A user with this email already exists.' });
     }
     res.status(500).json({ message: 'Server error updating user.' });
@@ -545,7 +530,6 @@ export const deleteUser = async (req, res) => {
   try {
     const userId = req.params.id;
 
-    // Prevent an admin from deleting themselves
     if (req.user.id === userId) {
       return res.status(403).json({ message: 'Administrators cannot delete their own account via this route.' });
     }
@@ -557,7 +541,6 @@ export const deleteUser = async (req, res) => {
     }
 
     res.status(200).json({ message: 'User deleted successfully' });
-
   } catch (error) {
     console.error('Error deleting user (Admin):', error);
     if (error.name === 'CastError') {
