@@ -9,15 +9,16 @@ import {
   getAllOrders,
   deleteOrder,
   getOrdersByDateRange,
+  getAvailability, // ✅ NEW
 } from '../controllers/inpersonContoller.js';
 
 dotenv.config();
 const router = express.Router();
 
-// ── IMPORTANT: date-range must be registered BEFORE /:orderId ─────────────────
+// ── IMPORTANT: date-range / availability must be registered BEFORE /:orderId ──
 // Express matches routes top-to-bottom. If /:orderId is listed first,
-// the string "date-range" would be captured as the orderId parameter
-// and the date-range handler would never be reached.
+// the string "date-range" (or "availability") would be captured as the
+// orderId parameter and the intended handler would never be reached.
 
 // ── Admin routes ───────────────────────────────────────────────────────────────
 // ✅ FIX: Added authorize(['admin']) — previously any logged-in user could
@@ -30,6 +31,12 @@ router.delete('/admin/in-person/:orderId', protect, authorize(['admin']), delete
 
 // ── User routes ────────────────────────────────────────────────────────────────
 router.use(protect);
+
+// ✅ NEW — must come before '/in-person/:orderId' below, same reasoning as
+// date-range above: otherwise Express would treat "availability" as an
+// :orderId value and this route would never be reached.
+router.get('/in-person/availability', getAvailability);
+
 router.post('/in-person/',           createOrder);
 router.get('/in-person/',            getUserOrders);
 router.get('/in-person/:orderId',    getOrderById);

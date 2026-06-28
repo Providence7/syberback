@@ -3,6 +3,16 @@
 //    admin frontend can destructure data.orders correctly.
 //    Previously it may have returned a bare array or a different shape,
 //    causing the admin table to render empty even when records existed.
+//
+// ✅ NEW FIX: createOrder now relies on a unique index on `date` (see the
+//    model) to prevent two clients from booking the same date + time slot.
+//    If a second request collides with an already-booked slot, MongoDB
+//    throws a duplicate-key error (code 11000), which we catch here and
+//    turn into a friendly 409 response instead of a generic 500.
+//
+// ✅ NEW: getAvailability lets the frontend ask "which time slots are
+//    already booked for this date?" before the user even submits, so they
+//    never pick a slot that's already gone.
 
 import InPersonOrder from '../models/inperson.js'; // adjust path to your model
 
@@ -15,8 +25,45 @@ export const createOrder = async (req, res) => {
     });
     res.status(201).json({ message: 'Appointment booked successfully.', order });
   } catch (err) {
+    // Duplicate key error from the unique index on `date` — someone else
+    // booked this exact date + time slot first (possibly milliseconds ago).
+    if (err.code === 11000) {
+      return res.status(409).json({
+        message: 'That date and time slot has just been booked by another client. Please choose a different time.',
+      });
+    }
     console.error('createOrder (in-person) error:', err);
     res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+
+// ── GET /api/order/in-person/availability ─────────────────────────────────────
+// Returns which time-slot labels are already taken for a given calendar date,
+// so the frontend can disable them before the user even attempts to submit.
+// Query param: ?date=YYYY-MM-DD
+export const getAvailability = async (req, res) => {
+  try {
+    const { date } = req.query;
+    if (!date) {
+      return res.status(400).json({ message: 'date is required (YYYY-MM-DD).' });
+    }
+
+    const dayStart = new Date(`${date}T00:00:00.000`);
+    const dayEnd   = new Date(`${date}T23:59:59.999`);
+
+    if (Number.isNaN(dayStart.getTime())) {
+      return res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD.' });
+    }
+
+    const booked = await InPersonOrder.find({
+      date:   { $gte: dayStart, $lte: dayEnd },
+      status: { $ne: 'cancelled' },
+    }).select('time');
+
+    res.status(200).json({ bookedSlots: booked.map((o) => o.time) });
+  } catch (err) {
+    console.error('getAvailability (in-person) error:', err);
+    res.status(500).json({ message: err.message || 'Failed to fetch availability.' });
   }
 };
 
@@ -120,6 +167,8 @@ export const deleteOrder = async (req, res) => {
       // Admin soft-deletes (marks cancelled) so the audit trail is preserved
       // ✅ After deletion, getAllOrders excludes { status: 'cancelled' } by default,
       //    so the order disappears from the admin table without losing the record.
+      // ✅ This also frees up the date/time slot for rebooking, since the
+      //    unique index's partialFilterExpression ignores cancelled orders.
       order.status = 'cancelled';
       await order.save();
       return res.status(200).json({ message: 'Appointment cancelled successfully.' });
