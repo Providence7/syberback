@@ -6,7 +6,7 @@ const FabricSchema = new Schema({
     material: {
         type: String,
         required: true,
-        enum: ['Cotton', 'Silk', 'Linen', 'Wool', 'Polyester', 'Rayon', 'Satin', 'Velvet', 'Other'],
+        enum: ['Aso oke', 'Adire', 'Batik', 'Wool', 'Polyester', 'Kente', 'Satin', 'Velvet', 'Other'],
         default: 'Cotton'
     },
     color: {

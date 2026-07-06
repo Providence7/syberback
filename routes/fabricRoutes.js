@@ -3,6 +3,7 @@ import express from 'express';
 const router = express.Router();
 import {
     addFabric,
+    bulkCreateFabrics,
     getFabrics,
     getFabricById,
     updateFabric,
@@ -10,6 +11,11 @@ import {
 } from '../controllers/fabricContoller.js'; // Fixed typo: fabricContoller -> fabricController
 import { protect, authorize } from '../middlewares/authMiddleware.js';
 import upload from '../utils/fabric.js'; // Import your custom multer setup
+
+// @route   POST /api/fabrics/bulk
+// @desc    Bulk-create fabrics from an array of { ..., imageUrl } (Admin only)
+// @access  Private (Admin)
+router.post('/bulk', protect, authorize(['admin']), bulkCreateFabrics);
 
 // @route   POST /api/fabrics
 // @desc    Add a new fabric (Admin only)

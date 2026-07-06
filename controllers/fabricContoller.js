@@ -69,17 +69,17 @@ export const addFabric = async (req, res) => {
 
         const fabric = await newFabric.save();
         try {
-  const io = req.app.get('io');
-  const users = await User.find({}, '_id');
-  await broadcastNotification(io, users.map(u => u._id), {
-    title:    '🧵 New Material Available',
-    message:  `"${fabric.title}" has been added to our materials catalogue.`,
-    type:     'info',
-    category: 'material',
-  });
-} catch (notifErr) {
-  console.error('Notification error (non-blocking):', notifErr.message);
-}
+            const io = req.app.get('io');
+            const users = await User.find({}, '_id');
+            await broadcastNotification(io, users.map(u => u._id), {
+                title:    '🧵 New Material Available',
+                message:  `"${fabric.title}" has been added to our materials catalogue.`,
+                type:     'info',
+                category: 'material',
+            });
+        } catch (notifErr) {
+            console.error('Notification error (non-blocking):', notifErr.message);
+        }
         res.status(201).json({
             success: true,
             message: 'Fabric added successfully',
@@ -100,14 +100,114 @@ export const addFabric = async (req, res) => {
             for (let field in err.errors) {
                 errors[field] = err.errors[field].message;
             }
-            return res.status(400).json({ 
-                msg: 'Validation failed', 
-                errors: errors, 
-                message: err.message 
+            return res.status(400).json({
+                msg: 'Validation failed',
+                errors: errors,
+                message: err.message
             });
         }
         res.status(500).json({ msg: 'Server Error', error: err.message });
     }
+};
+
+// @route   POST /api/fabrics/bulk
+// @desc    Bulk-create fabrics from an array of { title, ..., imageUrl }
+//          Cloudinary fetches each imageUrl server-side, so any public URL works.
+// @access  Private (Admin)
+export const bulkCreateFabrics = async (req, res) => {
+    const { fabrics } = req.body;
+
+    if (!Array.isArray(fabrics) || fabrics.length === 0) {
+        return res.status(400).json({ msg: 'Request body must include a non-empty "fabrics" array.' });
+    }
+
+    const saved = [];
+    const failed = [];
+    const seenTitles = new Set(); // guard against duplicate titles within the same batch
+
+    for (const item of fabrics) {
+        const {
+            title, material, color, quality, price, description,
+            details, width, weight, care, tags, imageUrl
+        } = item || {};
+
+        try {
+            // Basic required-field validation (mirrors frontend gating)
+            if (!title || !price || !description || !details || !width || !imageUrl) {
+                throw new Error('Missing required field(s): title, price, width, description, details, or imageUrl.');
+            }
+
+            if (seenTitles.has(title)) {
+                throw new Error('Duplicate title within this batch.');
+            }
+
+            const existingFabric = await Fabric.findOne({ title });
+            if (existingFabric) {
+                throw new Error('A fabric with this title already exists.');
+            }
+
+            // Cloudinary can ingest directly from a remote URL — no manual fetch needed
+            const uploadResult = await cloudinary.uploader.upload(imageUrl, {
+                folder: 'fabrics',
+            });
+
+            let processedTags = [];
+            if (tags) {
+                if (typeof tags === 'string') {
+                    processedTags = tags.split(',').map(t => t.trim()).filter(Boolean);
+                } else if (Array.isArray(tags)) {
+                    processedTags = tags.filter(t => t && t.trim() !== '');
+                }
+            }
+
+            const newFabric = new Fabric({
+                title,
+                material,
+                color,
+                quality,
+                price: Number(price),
+                image: uploadResult.secure_url,
+                cloudinary_id: uploadResult.public_id,
+                description,
+                details,
+                width,
+                weight,
+                care,
+                tags: processedTags,
+                addedBy: req.user.id,
+            });
+
+            const fabricDoc = await newFabric.save();
+            seenTitles.add(title);
+            saved.push({ title: fabricDoc.title, id: fabricDoc._id });
+
+        } catch (err) {
+            console.error(`Bulk upload failed for "${title}":`, err.message);
+            failed.push({ title, error: err.message });
+        }
+    }
+
+    // One summary notification instead of spamming per-item
+    if (saved.length > 0) {
+        try {
+            const io = req.app.get('io');
+            const users = await User.find({}, '_id');
+            await broadcastNotification(io, users.map(u => u._id), {
+                title:    '🧵 New Materials Available',
+                message:  `${saved.length} new fabric${saved.length !== 1 ? 's' : ''} added to our materials catalogue.`,
+                type:     'info',
+                category: 'material',
+            });
+        } catch (notifErr) {
+            console.error('Notification error (non-blocking):', notifErr.message);
+        }
+    }
+
+    res.status(saved.length > 0 ? 201 : 400).json({
+        success: failed.length === 0,
+        saved,
+        failed,
+    });
 };
 
 // @route   GET /api/fabrics
@@ -223,17 +323,17 @@ export const updateFabric = async (req, res) => {
 
         const updatedFabric = await fabric.save();
         try {
-  const io = req.app.get('io');
-  const users = await User.find({}, '_id');
-  await broadcastNotification(io, users.map(u => u._id), {
-    title:    '🧵 Material updated',
-    message:  `"${fabric.title}" has been added to our materials catalogue.`,
-    type:     'info',
-    category: 'material',
-  });
-} catch (notifErr) {
-  console.error('Notification error (non-blocking):', notifErr.message);
-}
+            const io = req.app.get('io');
+            const users = await User.find({}, '_id');
+            await broadcastNotification(io, users.map(u => u._id), {
+                title:    '🧵 Material updated',
+                message:  `"${fabric.title}" has been updated in our materials catalogue.`,
+                type:     'info',
+                category: 'material',
+            });
+        } catch (notifErr) {
+            console.error('Notification error (non-blocking):', notifErr.message);
+        }
         res.json({
             success: true,
             message: 'Fabric updated successfully',
@@ -257,10 +357,10 @@ export const updateFabric = async (req, res) => {
             for (let field in err.errors) {
                 errors[field] = err.errors[field].message;
             }
-            return res.status(400).json({ 
-                msg: 'Validation failed', 
-                errors: errors, 
-                message: err.message 
+            return res.status(400).json({
+                msg: 'Validation failed',
+                errors: errors,
+                message: err.message
             });
         }
         res.status(500).json({ msg: 'Server Error', error: err.message });
@@ -298,9 +398,9 @@ export const deleteFabric = async (req, res) => {
 
         await Fabric.findByIdAndDelete(req.params.id);
 
-        res.json({ 
+        res.json({
             success: true,
-            message: 'Fabric deleted successfully' 
+            message: 'Fabric deleted successfully'
         });
     } catch (err) {
         console.error('Error deleting fabric:', err.message);
