@@ -3,10 +3,10 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export const signAccessToken = payload =>
-  jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
+  jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
 
 export const signRefreshToken = payload =>
-  jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
+  jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '2d' });
 
 export const verifyAccessToken = token =>
   jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);

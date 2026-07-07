@@ -22,7 +22,7 @@ export async function sendEmail({ to, subject, html }) {
       to: [{ email: to }],
       sender: { 
         email: process.env.BREVO_FROM_EMAIL || "no-reply@syber.onrender.com",
-        name: "SyberTailor"
+        name: "Attirebyte"
       },
       subject,
       htmlContent: html,

@@ -2,6 +2,7 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
+import ms from 'ms';
 import dotenv from 'dotenv';
 import User from '../models/user.js';
 import Order from '../models/order.js';
@@ -24,6 +25,16 @@ const getCookieOptions = () => ({
   sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
   path: '/',
 });
+
+// Single source of truth for token lifetimes — read once from env so the
+// cookie's maxAge and the JWT's own `exp` claim can never drift apart.
+// IMPORTANT: utils/jwt.js's signAccessToken/signRefreshToken must use these
+// same env vars (ACCESS_TOKEN_EXPIRES_IN / REFRESH_TOKEN_EXPIRES_IN) when
+// signing, or the cookie lifetime and the token's actual expiry will
+// disagree again — which is exactly the kind of mismatch that causes
+// "sometimes works, sometimes says no access" symptoms.
+const ACCESS_TOKEN_MAX_AGE  = ms(process.env.ACCESS_TOKEN_EXPIRES_IN  || '15m');
+const REFRESH_TOKEN_MAX_AGE = ms(process.env.REFRESH_TOKEN_EXPIRES_IN || '7d');
 
 // ------------------------------
 // 👤 Register
@@ -111,8 +122,8 @@ export async function login(req, res) {
     const cookieOptions = getCookieOptions();
 
     res
-      .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
-      .cookie('refreshToken', refreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
+      .cookie('accessToken', accessToken, { ...cookieOptions, maxAge: ACCESS_TOKEN_MAX_AGE })
+      .cookie('refreshToken', refreshToken, { ...cookieOptions, maxAge: REFRESH_TOKEN_MAX_AGE })
       .json({
         message: 'Login successful',
         user: {
@@ -167,9 +178,12 @@ export async function refresh(req, res) {
     const user = await User.findById(payload.id);
 
     if (!user || user.refreshToken !== token) {
+      // Moved the warning here — it now correctly logs only on an actual
+      // invalid/revoked/rotated-out token, not on every successful refresh.
+      console.warn('Refresh attempt: Invalid or revoked refresh token.');
       return res.sendStatus(403);
     }
-    console.warn('Refresh attempt: Invalid or revoked refresh token.');
+
     const newAccessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
     const newRefreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
 
@@ -178,8 +192,8 @@ export async function refresh(req, res) {
 
     const cookieOptions = getCookieOptions();
     res
-      .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: 15 * 60 * 1000 })
-      .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: 7 * 24 * 60 * 60 * 1000 })
+      .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: ACCESS_TOKEN_MAX_AGE })
+      .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: REFRESH_TOKEN_MAX_AGE })
       .json({ message: 'Tokens refreshed successfully' });
 
   } catch (err) {
