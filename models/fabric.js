@@ -1,13 +1,36 @@
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
 
+// ─── Material → Unit mapping ───────────────────────────────────────────────
+// Single source of truth. The `unit` field is NEVER accepted from the client —
+// it's always derived from `material` right before validation/save, so it
+// can never drift out of sync no matter what a request body contains.
+export const MATERIAL_UNIT_MAP = {
+    'Aso oke': 'cap',
+    'Adire':   'yards',
+    'Batik':   'yards',
+    'Kente':   'yards',
+    'Lace':    'yards',
+    'Wool':    'trouser',
+    'cotton':  'trouser',
+    'Other':   'trouser',
+};
+
+export const getUnitForMaterial = (material) => MATERIAL_UNIT_MAP[material] || 'trouser';
+
 const FabricSchema = new Schema({
     title: { type: String, required: true, trim: true },
     material: {
         type: String,
         required: true,
-        enum: ['Aso oke', 'Adire', 'Batik', 'Wool', 'Polyester', 'Kente', 'Satin', 'Velvet', 'Other'],
+        enum: ['Aso oke', 'Adire', 'Batik', 'Wool', 'cotton', 'Kente', 'Lace', 'Other'],
         default: 'Cotton'
+    },
+    unit: {
+        type: String,
+        required: true,
+        enum: ['cap', 'yards', 'trouser'],
+        // No default needed — always set in the pre-validate hook below.
     },
     color: {
         type: String,
@@ -49,6 +72,16 @@ const FabricSchema = new Schema({
         type: Date,
         default: Date.now
     }
+});
+
+// Always recompute `unit` from `material` right before validation runs —
+// this fires on every save() (create AND update), so editing a fabric's
+// material later also keeps its unit correct automatically.
+FabricSchema.pre('validate', function (next) {
+    if (this.material) {
+        this.unit = getUnitForMaterial(this.material);
+    }
+    next();
 });
 
 export default mongoose.model('Fabric', FabricSchema);
