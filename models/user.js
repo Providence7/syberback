@@ -55,6 +55,27 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  // --- NEW FIELD: location ---
+  // GPS pin captured from the customer's device (navigator.geolocation) at the
+  // point they saved their address. This is the durable, unambiguous reference
+  // point riders/dispatch actually use — `address` stays as the human-readable
+  // text description shown in the UI, but `location` is the source of truth.
+  location: {
+    lat: {
+      type: Number,
+      default: null,
+    },
+    lng: {
+      type: Number,
+      default: null,
+    },
+    // When the pin was captured/last updated — useful for knowing if a saved
+    // pin might be stale (e.g. customer moved) vs. freshly confirmed.
+    updatedAt: {
+      type: Date,
+      default: null,
+    },
+  },
   // --- NEW FIELD: isAdmin ---
   isAdmin: {
     type: Boolean,

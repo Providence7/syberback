@@ -26,6 +26,20 @@ const getCookieOptions = () => ({
   path: '/',
 });
 
+// Validates and normalizes a { lat, lng } payload from the client.
+// Returns null if no usable coordinates were sent, so callers can safely
+// skip touching `location` when the client didn't include one (e.g. a
+// profile edit that only changes the phone number shouldn't wipe out a
+// previously saved GPS pin).
+const parseLocation = (location) => {
+  if (!location || typeof location !== 'object') return null;
+  const lat = Number(location.lat);
+  const lng = Number(location.lng);
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng, updatedAt: new Date() };
+};
+
 // Single source of truth for token lifetimes — read once from env so the
 // cookie's maxAge and the JWT's own `exp` claim can never drift apart.
 // IMPORTANT: utils/jwt.js's signAccessToken/signRefreshToken must use these
@@ -286,14 +300,23 @@ export const getProfile = async (req, res) => {
 // Update Profile
 export const updateProfile = async (req, res) => {
   try {
-    const { name, email, phone, address } = req.body;
+    const { name, email, phone, address, location } = req.body;
     if (!req.user || !req.user.id) {
       return res.status(401).json({ message: 'Not authenticated or user ID missing.' });
     }
 
+    // Only touch `location` if the client actually sent usable coordinates —
+    // this way a plain text/phone edit never silently wipes a previously
+    // saved GPS pin.
+    const parsedLocation = parseLocation(location);
+    const updatePayload = { name, email, phone, address };
+    if (parsedLocation) {
+      updatePayload.location = parsedLocation;
+    }
+
     const updatedUser = await User.findByIdAndUpdate(
       req.user.id,
-      { name, email, phone, address },
+      updatePayload,
       { new: true, runValidators: true }
     ).select('-password');
 
@@ -485,7 +508,7 @@ export const getAdminDashboardStats = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const userId = req.params.id;
-    const { name, email, phone, address, isAdmin, isVerified } = req.body;
+    const { name, email, phone, address, location, isAdmin, isVerified } = req.body;
 
     const user = await User.findById(userId);
 
@@ -507,6 +530,14 @@ export const updateUser = async (req, res) => {
     }
     user.phone      = phone      || user.phone;
     user.address    = address    || user.address;
+
+    // Same guard as updateProfile: only overwrite the saved GPS pin if the
+    // admin form actually sent valid coordinates.
+    const parsedLocation = parseLocation(location);
+    if (parsedLocation) {
+      user.location = parsedLocation;
+    }
+
     user.isAdmin    = typeof isAdmin    === 'boolean' ? isAdmin    : user.isAdmin;
     user.isVerified = typeof isVerified === 'boolean' ? isVerified : user.isVerified;
 
@@ -521,6 +552,7 @@ export const updateUser = async (req, res) => {
         email:      updatedUser.email,
         phone:      updatedUser.phone,
         address:    updatedUser.address,
+        location:   updatedUser.location,
         isAdmin:    updatedUser.isAdmin,
         isVerified: updatedUser.isVerified,
       },
