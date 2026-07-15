@@ -4,7 +4,7 @@ import {
   register, verifyEmail, login, logout, updateProfile, getProfile,
   refresh, me, requestPasswordReset, resetPassword,  getUserById, updateUser, deleteUser,
   getAllUsers, // Existing admin functions
-  getAdminDashboardStats // NEW: Import the dashboard stats function
+  getAdminDashboardStats // Admin dashboard stats function
 } from '../controllers/authController.js';
 
 import { protect, authorize } from '../middlewares/authMiddleware.js';
