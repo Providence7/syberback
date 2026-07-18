@@ -83,7 +83,6 @@ export async function register(req, res) {
       },
     });
   } catch (error) {
-    console.error('Registration error:', error);
     res.status(500).json({ message: 'Server error during registration.' });
   }
 }
@@ -106,7 +105,6 @@ export async function verifyEmail(req, res) {
 
     res.json({ message: 'Email verified successfully!' });
   } catch (error) {
-    console.error('Email verification error:', error);
     res.status(500).json({ message: 'Server error during email verification.' });
   }
 }
@@ -147,10 +145,7 @@ export async function login(req, res) {
           isVerified: user.isVerified,
         },
       });
-
-    console.log('✅ Cookies sent:', res.getHeaders()['set-cookie']);
   } catch (error) {
-    console.error('Login error:', error);
     res.status(500).json({ message: 'Server error during login.' });
   }
 }
@@ -162,7 +157,6 @@ export async function logout(req, res) {
   try {
     if (req.user?.id) {
       await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
-      console.log(`User ${req.user.id} logged out, refresh token revoked.`);
     }
 
     const cookieOptions = getCookieOptions();
@@ -171,7 +165,6 @@ export async function logout(req, res) {
       .clearCookie('refreshToken', cookieOptions)
       .sendStatus(204);
   } catch (error) {
-    console.error('Logout error:', error);
     res.status(500).json({ message: 'Server error during logout.' });
   }
 }
@@ -183,7 +176,6 @@ export async function refresh(req, res) {
   const token = req.cookies?.refreshToken;
 
   if (!token) {
-    console.warn('Refresh attempt: No refresh token in cookies.');
     return res.sendStatus(401);
   }
 
@@ -192,9 +184,6 @@ export async function refresh(req, res) {
     const user = await User.findById(payload.id);
 
     if (!user || user.refreshToken !== token) {
-      // Moved the warning here — it now correctly logs only on an actual
-      // invalid/revoked/rotated-out token, not on every successful refresh.
-      console.warn('Refresh attempt: Invalid or revoked refresh token.');
       return res.sendStatus(403);
     }
 
@@ -211,7 +200,6 @@ export async function refresh(req, res) {
       .json({ message: 'Tokens refreshed successfully' });
 
   } catch (err) {
-    console.error('Refresh token error:', err.message);
     res.sendStatus(403);
   }
 }
@@ -256,7 +244,6 @@ export async function requestPasswordReset(req, res) {
 
     res.json({ message: 'Password reset link sent to your email.' });
   } catch (error) {
-    console.error('Request password reset error:', error);
     res.status(500).json({ message: 'Server error during password reset request.' });
   }
 }
@@ -279,7 +266,6 @@ export async function resetPassword(req, res) {
 
     res.json({ message: 'Password reset successful.' });
   } catch (error) {
-    console.error('Reset password error:', error);
     res.status(500).json({ message: 'Server error during password reset.' });
   }
 }
@@ -292,7 +278,6 @@ export const getProfile = async (req, res) => {
     }
     res.json(req.user);
   } catch (err) {
-    console.error('Get profile error:', err);
     res.status(500).json({ error: 'Server error fetching profile.' });
   }
 };
@@ -326,7 +311,6 @@ export const updateProfile = async (req, res) => {
 
     res.json({ message: 'Profile updated successfully', user: updatedUser });
   } catch (err) {
-    console.error('Update profile error:', err);
     if (err.code === 11000) {
       return res.status(400).json({ message: 'Email already exists. Please use a different email.' });
     }
@@ -340,7 +324,6 @@ export const getAllUsers = async (req, res) => {
     const users = await User.find({}).select('-password -refreshToken');
     res.status(200).json(users);
   } catch (error) {
-    console.error('Error fetching all users:', error);
     res.status(500).json({ message: 'Server error fetching users.' });
   }
 };
@@ -354,7 +337,6 @@ export const getUserById = async (req, res) => {
     }
     res.status(200).json(user);
   } catch (error) {
-    console.error('Error fetching user by ID:', error);
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format.' });
     }
@@ -370,11 +352,21 @@ export const getAdminDashboardStats = async (req, res) => {
     const ACTIVITIES_LIMIT = 20;
 
     // ── Scalar counts ──────────────────────────────────────
-    const users    = await User.countDocuments();
-    const orders   = await Order.countDocuments();
+    const users = await User.countDocuments();
 
-    const paidAgg  = await Order.aggregate([
-      { $match: { paymentStatus: 'paid' } },
+    // "orders" reflects active orders only — cancelled orders are excluded
+    // so this stat drops immediately when an order is cancelled instead of
+    // permanently counting orders that no longer represent live business.
+    const orders    = await Order.countDocuments({ status: { $ne: 'cancelled' } });
+    const cancelled = await Order.countDocuments({ status: 'cancelled' });
+
+    // Revenue only counts orders that are both paid AND not cancelled.
+    // A paid order that gets cancelled keeps paymentStatus:'paid' as a
+    // historical record (see cancelOrder in order.js), so without the
+    // status exclusion here its total would keep inflating "payments"
+    // even though the sale no longer stands.
+    const paidAgg = await Order.aggregate([
+      { $match: { paymentStatus: 'paid', status: { $ne: 'cancelled' } } },
       { $group: { _id: null, total: { $sum: '$totalPrice' } } },
     ]);
     const payments = paidAgg[0]?.total ?? 0;
@@ -388,7 +380,13 @@ export const getAdminDashboardStats = async (req, res) => {
     sevenDaysAgo.setHours(0, 0, 0, 0);
 
     const revenueTrend = await Order.aggregate([
-      { $match: { createdAt: { $gte: sevenDaysAgo }, paymentStatus: 'paid' } },
+      {
+        $match: {
+          createdAt:     { $gte: sevenDaysAgo },
+          paymentStatus: 'paid',
+          status:        { $ne: 'cancelled' },
+        },
+      },
       {
         $group: {
           _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
@@ -424,7 +422,7 @@ export const getAdminDashboardStats = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(ACTIVITIES_LIMIT)
       .populate('user', 'name')
-      .select('totalPrice status paymentStatus createdAt updatedAt user');
+      .select('totalPrice status paymentStatus createdAt updatedAt user cancellationReason');
 
     // ── Build combined activity list ───────────────────────
     const combinedActivities = [];
@@ -466,6 +464,8 @@ export const getAdminDashboardStats = async (req, res) => {
       });
 
     // 4. Order status changes  (any order that isn't 'pending' has had a status event)
+    //    Cancellations get their reason surfaced via the `note` field so the
+    //    admin feed shows *why*, not just that the status flipped.
     rawOrders
       .filter(o => o.status && o.status !== 'pending')
       .forEach(o => {
@@ -474,6 +474,7 @@ export const getAdminDashboardStats = async (req, res) => {
           user:    o.user?.name || null,
           orderId: o._id.toString().slice(-6).toUpperCase(),
           status:  o.status,
+          note:    o.status === 'cancelled' ? o.cancellationReason : undefined,
           date:    o.updatedAt || o.createdAt,
           sortKey: o.updatedAt || o.createdAt,
         });
@@ -490,6 +491,7 @@ export const getAdminDashboardStats = async (req, res) => {
       users,
       payments,
       orders,
+      cancelled,
       schedule,
       visits,
       recent,
@@ -497,7 +499,6 @@ export const getAdminDashboardStats = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error fetching admin dashboard stats:', error);
     res.status(500).json({ message: 'Failed to fetch dashboard statistics.' });
   }
 };
@@ -558,7 +559,6 @@ export const updateUser = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error updating user (Admin):', error);
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format.' });
     }
@@ -588,7 +588,6 @@ export const deleteUser = async (req, res) => {
 
     res.status(200).json({ message: 'User deleted successfully' });
   } catch (error) {
-    console.error('Error deleting user (Admin):', error);
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format.' });
     }

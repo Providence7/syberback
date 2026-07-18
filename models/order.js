@@ -82,6 +82,14 @@ const orderSchema = new mongoose.Schema({
   measurementRequested: { type: Boolean, default: false },
   requestedSize:        { type: String },
 
+  // ── Cancellation ───────────────────────────────────────────────────────
+  // Set by the client-facing cancelOrder controller. paymentStatus is left
+  // untouched on cancel — if the order was already paid, that history is
+  // preserved (refunds are a separate, unimplemented flow); if it was
+  // still unpaid, it simply never gets charged.
+  cancellationReason: { type: String, default: null },
+  cancelledAt:         { type: Date,   default: null },
+
 }, { timestamps: true });
 
 // ── Pre-save: ONLY auto-fill customer info on new documents ──────────────────

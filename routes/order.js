@@ -9,6 +9,7 @@ import {
   getOrderById,
   deleteOrder,
   verifyOrderPayment,
+  cancelOrder,
   getAdminOrders,
   getAdminOrderById,
   updateOrderAdmin,
@@ -26,6 +27,18 @@ const paymentLimiter = rateLimit({
   max: 10,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { message: 'Too many payment attempts. Please wait a few minutes and try again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ── Rate limiter for cancellation endpoint ────────────────────────────────────
+// Prevents accidental/abusive rapid-fire cancel requests. Generous limit
+// since it's a legitimate self-service action, not a sensitive one.
+const cancelLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { message: 'Too many cancellation attempts. Please wait a few minutes and try again.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -55,5 +68,15 @@ router.delete('/:id', protect, deleteOrder);
 //        - idempotent 409 if already paid
 //        - reference reuse check across orders
 router.post('/:id/pay', protect, paymentLimiter, verifyOrderPayment);
+
+// ── Client-initiated cancellation ─────────────────────────────────────────────
+// Security layers:
+//   1. protect       — valid JWT/session cookie required
+//   2. cancelLimiter  — rate-limited per user
+//   3. cancelOrder (controller):
+//        - ownership check
+//        - requires a reason from a fixed allowlist ('Other' requires free text)
+//        - blocked for already-cancelled or completed orders
+router.patch('/:id/cancel', protect, cancelLimiter, cancelOrder);
 
 export default router;

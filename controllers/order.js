@@ -10,21 +10,14 @@ dotenv.config();
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 
-// ── Structured payment logger ─────────────────────────────────────────────────
-// Every payment event is logged as JSON to stdout/stderr.
-// This appears in your Render logs — search by event name to debug any issue.
-// Never again will an error disappear before you can read it.
-function logPayment(level, event, orderId, details = {}) {
-  const entry = {
-    ts:      new Date().toISOString(),
-    event,
-    orderId: orderId?.toString() || 'unknown',
-    ...details,
-  };
-  if (level === 'error') console.error(`[PAYMENT:ERROR] ${JSON.stringify(entry)}`);
-  else if (level === 'warn')  console.warn(`[PAYMENT:WARN] ${JSON.stringify(entry)}`);
-  else                        console.log(`[PAYMENT:INFO] ${JSON.stringify(entry)}`);
-}
+// ── Cancellation reasons the client UI is allowed to send ─────────────────────
+// Keep this in sync with CANCEL_REASONS in the Orders.jsx frontend.
+const CANCEL_REASONS = [
+  'Ordered by mistake',
+  'Found a better price elsewhere',
+  'Changed my mind',
+  'Other',
+];
 
 // ── POST /api/orders ──────────────────────────────────────────────────────────
 export const createOrder = async (req, res) => {
@@ -70,11 +63,6 @@ export const createOrder = async (req, res) => {
       expectedDeliveryDate: null,
     });
 
-    logPayment('info', 'order.created', order._id, {
-      customer: user.email,
-      total:    computedTotal,
-    });
-
     const io = req.app.get('io');
     await notifyUser(io, req.user.id, {
       title:    'Order Created',
@@ -85,7 +73,6 @@ export const createOrder = async (req, res) => {
 
     res.status(201).json({ message: 'Order created successfully.', order });
   } catch (err) {
-    console.error('createOrder error:', err);
     res.status(500).json({ message: err.message || 'Server error' });
   }
 };
@@ -99,34 +86,30 @@ export const verifyOrderPayment = async (req, res) => {
 
     // ── Input validation ──────────────────────────────────────────────────────
     if (!reference || typeof reference !== 'string') {
-      logPayment('warn', 'verify.bad_reference', orderId, { reference, userId: req.user.id });
       return res.status(400).json({ message: 'Payment reference is required.' });
     }
 
     if (!/^[a-zA-Z0-9_-]{5,100}$/.test(reference)) {
-      logPayment('warn', 'verify.invalid_reference_format', orderId, { reference, userId: req.user.id });
       return res.status(400).json({ message: 'Invalid payment reference format.' });
     }
 
     const order = await Order.findById(orderId);
     if (!order) {
-      logPayment('warn', 'verify.order_not_found', orderId, { reference, userId: req.user.id });
       return res.status(404).json({ message: 'Order not found.' });
     }
 
     // ── Ownership check ───────────────────────────────────────────────────────
     if (order.user.toString() !== req.user.id.toString()) {
-      logPayment('warn', 'verify.unauthorized', orderId, {
-        reference,
-        orderOwner: order.user.toString(),
-        requester:  req.user.id,
-      });
       return res.status(403).json({ message: 'Not authorised.' });
+    }
+
+    // ── Cancelled orders cannot be paid ───────────────────────────────────────
+    if (order.status === 'cancelled') {
+      return res.status(400).json({ message: 'This order has been cancelled and can no longer be paid for.' });
     }
 
     // ── Idempotency ───────────────────────────────────────────────────────────
     if (order.paymentStatus === 'paid') {
-      logPayment('info', 'verify.already_paid', orderId, { reference });
       return res.status(409).json({ message: 'Order already paid.', order });
     }
 
@@ -136,19 +119,12 @@ export const verifyOrderPayment = async (req, res) => {
       _id: { $ne: order._id },
     });
     if (existingRefOrder) {
-      logPayment('warn', 'verify.reference_reuse', orderId, {
-        reference,
-        previousOrderId: existingRefOrder._id.toString(),
-        userId: req.user.id,
-      });
       return res.status(400).json({
         message: 'This payment reference has already been used. Please contact support.',
       });
     }
 
     // ── Server-to-server Paystack verification ────────────────────────────────
-    logPayment('info', 'verify.calling_paystack', orderId, { reference });
-
     let paystackData;
     try {
       const paystackRes = await fetch(
@@ -160,31 +136,16 @@ export const verifyOrderPayment = async (req, res) => {
       );
 
       if (!paystackRes.ok) {
-        logPayment('error', 'verify.paystack_http_error', orderId, {
-          reference,
-          paystackStatus:     paystackRes.status,
-          paystackStatusText: paystackRes.statusText,
-        });
         return res.status(502).json({ message: 'Could not reach payment gateway. Please try again.' });
       }
 
       paystackData = await paystackRes.json();
     } catch (fetchErr) {
-      logPayment('error', 'verify.paystack_fetch_failed', orderId, {
-        reference,
-        error:     fetchErr.message,
-        errorName: fetchErr.name,
-      });
       return res.status(502).json({ message: 'Payment gateway timeout. Please contact support.' });
     }
 
     // ── Check Paystack transaction status ─────────────────────────────────────
     if (!paystackData.status || paystackData.data?.status !== 'success') {
-      logPayment('warn', 'verify.paystack_not_success', orderId, {
-        reference,
-        paystackStatus:  paystackData.data?.status,
-        paystackMessage: paystackData.message,
-      });
       order.paymentStatus = 'failed';
       await order.save();
       return res.status(400).json({
@@ -197,13 +158,6 @@ export const verifyOrderPayment = async (req, res) => {
     const expectedKobo   = Math.round(order.totalPrice * 100);
 
     if (amountPaidKobo !== expectedKobo) {
-      logPayment('error', 'verify.amount_mismatch', orderId, {
-        reference,
-        expectedKobo,
-        receivedKobo:  amountPaidKobo,
-        expectedNaira: order.totalPrice,
-        receivedNaira: amountPaidKobo / 100,
-      });
       order.paymentStatus = 'failed';
       await order.save();
       return res.status(400).json({
@@ -211,16 +165,6 @@ export const verifyOrderPayment = async (req, res) => {
           `Payment amount mismatch. Expected ₦${order.totalPrice.toLocaleString()}, ` +
           `received ₦${(amountPaidKobo / 100).toLocaleString()}. ` +
           `Please contact support with reference: ${reference}.`,
-      });
-    }
-
-    // ── Email mismatch: log but don't hard-fail ───────────────────────────────
-    const paystackEmail = paystackData.data?.customer?.email?.toLowerCase();
-    if (paystackEmail && paystackEmail !== order.customerEmail.toLowerCase()) {
-      logPayment('warn', 'verify.email_mismatch', orderId, {
-        reference,
-        orderEmail:    order.customerEmail,
-        paystackEmail,
       });
     }
 
@@ -236,13 +180,6 @@ export const verifyOrderPayment = async (req, res) => {
 
     await order.save();
 
-    logPayment('info', 'verify.success', orderId, {
-      reference,
-      customer:     order.customerEmail,
-      amountNaira:  order.totalPrice,
-      deliveryDate: order.expectedDeliveryDate,
-    });
-
     const io            = req.app.get('io');
     const deliveryLabel = order.expectedDeliveryDate.toLocaleDateString('en-US', {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
@@ -257,7 +194,7 @@ export const verifyOrderPayment = async (req, res) => {
         category: 'order',
       });
     } catch (notifyErr) {
-      logPayment('warn', 'verify.customer_notify_failed', orderId, { error: notifyErr.message });
+      // in-app notification failed; payment itself is already confirmed above
     }
 
     // ── Notify admins (in-app) ────────────────────────────────────────────────
@@ -276,7 +213,7 @@ export const verifyOrderPayment = async (req, res) => {
         );
       }
     } catch (notifyErr) {
-      logPayment('warn', 'verify.admin_notify_failed', orderId, { error: notifyErr.message });
+      // admin notification failed; payment itself is already confirmed above
     }
 
     // ── Email customer ────────────────────────────────────────────────────────
@@ -298,7 +235,7 @@ export const verifyOrderPayment = async (req, res) => {
         `,
       });
     } catch (emailErr) {
-      logPayment('warn', 'verify.customer_email_failed', orderId, { error: emailErr.message });
+      // customer email failed; payment itself is already confirmed above
     }
 
     // ── Email admin ───────────────────────────────────────────────────────────
@@ -319,7 +256,7 @@ export const verifyOrderPayment = async (req, res) => {
         `,
       });
     } catch (emailErr) {
-      logPayment('warn', 'verify.admin_email_failed', orderId, { error: emailErr.message });
+      // admin email failed; payment itself is already confirmed above
     }
 
     // ── Schedule order progress notifications ─────────────────────────────────
@@ -327,7 +264,7 @@ export const verifyOrderPayment = async (req, res) => {
       try {
         await scheduleOrderNotifications(order);
       } catch (schedErr) {
-        logPayment('warn', 'verify.schedule_notifications_failed', orderId, { error: schedErr.message });
+        // scheduling failed; payment itself is already confirmed above
       }
     }
 
@@ -337,12 +274,81 @@ export const verifyOrderPayment = async (req, res) => {
     });
 
   } catch (err) {
-    // Top-level catch — full context logged before any response
-    logPayment('error', 'verify.unhandled_exception', orderId, {
-      error:  err.message,
-      stack:  err.stack,
-      userId: req.user?.id,
-    });
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+
+// ── PATCH /api/orders/:id/cancel ───────────────────────────────────────────────
+// Client-initiated cancellation. Distinct from admin's updateOrderStatus:
+// this one is scoped to the order's owner, requires a reason, and works
+// whether or not the order has been paid yet (paymentStatus is left as-is —
+// a paid order that's cancelled keeps paymentStatus:'paid' as a historical
+// record; refunding it is a separate, unimplemented flow).
+export const cancelOrder = async (req, res) => {
+  const orderId = req.params.id;
+
+  try {
+    const { reason, customReason } = req.body;
+
+    if (!reason || !CANCEL_REASONS.includes(reason)) {
+      return res.status(400).json({
+        message: `A valid cancellation reason is required. Allowed: ${CANCEL_REASONS.join(', ')}`,
+      });
+    }
+
+    if (reason === 'Other' && (!customReason || !customReason.trim())) {
+      return res.status(400).json({ message: 'Please tell us why you are cancelling.' });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    if (order.user.toString() !== req.user.id.toString()) {
+      return res.status(403).json({ message: 'Not authorised.' });
+    }
+
+    if (order.status === 'cancelled') {
+      return res.status(409).json({ message: 'This order is already cancelled.', order });
+    }
+
+    if (order.status === 'completed') {
+      return res.status(400).json({ message: 'Completed orders cannot be cancelled.' });
+    }
+
+    const finalReason = reason === 'Other' ? customReason.trim() : reason;
+
+    order.status              = 'cancelled';
+    order.cancellationReason  = finalReason;
+    order.cancelledAt         = new Date();
+    await order.save();
+
+    // Stop any scheduled progress-reminder notifications for this order
+    cancelOrderNotifications(order._id.toString());
+
+    // Notify admins so dashboards / manual follow-up can react
+    try {
+      const admins = await User.find({ isAdmin: true }, '_id');
+      if (admins.length > 0) {
+        const io = req.app.get('io');
+        await broadcastNotification(
+          io,
+          admins.map(a => a._id),
+          {
+            title:    'Order Cancelled',
+            message:  `${order.customerName} cancelled their order for "${order.style?.title}". Reason: ${finalReason}`,
+            type:     'info',
+            category: 'order',
+          }
+        );
+      }
+    } catch (notifyErr) {
+      // admin notification failed; cancellation itself already succeeded above
+    }
+
+    res.status(200).json({ message: 'Order cancelled.', order });
+  } catch (err) {
     res.status(500).json({ message: err.message || 'Server error' });
   }
 };
@@ -389,7 +395,6 @@ export const deleteOrder = async (req, res) => {
     cancelOrderNotifications(order._id.toString());
     res.status(200).json({ message: 'Order deleted successfully.' });
   } catch (err) {
-    console.error('deleteOrder error:', err);
     res.status(500).json({ message: 'Failed to delete order.' });
   }
 };
@@ -416,6 +421,8 @@ const formatOrderForAdminFrontend = (order) => ({
   createdAt:            order.createdAt,
   updatedAt:            order.updatedAt,
   expectedDeliveryDate: order.expectedDeliveryDate,
+  cancellationReason:   order.cancellationReason,
+  cancelledAt:          order.cancelledAt,
 });
 
 // ── GET /api/orders/admin/all ─────────────────────────────────────────────────
@@ -442,7 +449,6 @@ export const getAdminOrders = async (req, res) => {
       orders:  orders.map(formatOrderForAdminFrontend),
     });
   } catch (err) {
-    console.error('Error fetching admin orders:', err);
     res.status(500).json({ message: 'Failed to fetch all orders' });
   }
 };
@@ -460,7 +466,6 @@ export const getAdminOrderById = async (req, res) => {
       order:   formatOrderForAdminFrontend(order),
     });
   } catch (err) {
-    console.error('Error fetching admin single order:', err);
     res.status(500).json({ message: 'Failed to fetch order' });
   }
 };
@@ -505,7 +510,6 @@ export const updateOrderStatus = async (req, res) => {
 
     res.status(200).json({ message: `Order status updated to "${status}".`, order });
   } catch (err) {
-    console.error('updateOrderStatus error:', err);
     res.status(500).json({ message: err.message });
   }
 };
@@ -579,7 +583,7 @@ export const updateOrderAdmin = async (req, res) => {
             html:    `<h2>Order Completed!</h2><p>Dear ${updatedOrder.user.name}, your order is ready!</p>`,
           });
         } catch (emailErr) {
-          console.error('Order completed email error:', emailErr);
+          // completion email failed; status update itself already succeeded above
         }
       }
 
@@ -593,7 +597,6 @@ export const updateOrderAdmin = async (req, res) => {
       order:   formatOrderForAdminFrontend(updatedOrder),
     });
   } catch (err) {
-    console.error('Error updating order by admin:', err);
     res.status(500).json({ message: 'Failed to update order' });
   }
 };
@@ -622,7 +625,6 @@ export const deleteOrderAdmin = async (req, res) => {
 
     res.status(200).json({ message: 'Order permanently deleted by admin.' });
   } catch (err) {
-    console.error('Error deleting order by admin:', err);
     res.status(500).json({ message: 'Failed to delete order' });
   }
 };
