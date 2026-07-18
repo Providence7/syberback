@@ -19,6 +19,8 @@ const CANCEL_REASONS = [
   'Other',
 ];
 
+const MAX_DELIVERY_NOTES_LENGTH = 500;
+
 // ── POST /api/orders ──────────────────────────────────────────────────────────
 export const createOrder = async (req, res) => {
   try {
@@ -27,6 +29,7 @@ export const createOrder = async (req, res) => {
       material,
       measurements,
       notes,
+      deliveryNotes,
       paymentChannel,
       measurementRequested,
       requestedSize,
@@ -42,6 +45,20 @@ export const createOrder = async (req, res) => {
       return res.status(404).json({ message: 'User not found.' });
     }
 
+    // ── Delivery info must exist on the profile before an order can be placed.
+    // It's snapshotted onto the order below so a later profile edit can
+    // never silently change where an already-placed order ships to.
+    if (!user.phone || !user.phone.trim()) {
+      return res.status(400).json({
+        message: 'Please add a phone number to your profile before placing an order — it\'s how our rider confirms delivery.',
+      });
+    }
+    if (!user.address || !user.address.trim()) {
+      return res.status(400).json({
+        message: 'Please add a delivery address to your profile before placing an order.',
+      });
+    }
+
     const computedTotal = calculateOrderTotal(style, material, measurementRequest);
 
     const order = await Order.create({
@@ -52,6 +69,16 @@ export const createOrder = async (req, res) => {
       material,
       measurements:         measurements || null,
       notes:                notes        || '',
+      delivery: {
+        phone:   user.phone.trim(),
+        address: user.address.trim(),
+        location: (user.location?.lat != null && user.location?.lng != null)
+          ? { lat: user.location.lat, lng: user.location.lng }
+          : { lat: null, lng: null },
+        notes: typeof deliveryNotes === 'string'
+          ? deliveryNotes.trim().slice(0, MAX_DELIVERY_NOTES_LENGTH)
+          : '',
+      },
       totalPrice:           computedTotal,
       orderType:            'Online',
       paymentChannel:       paymentChannel || 'card',
@@ -250,6 +277,11 @@ export const verifyOrderPayment = async (req, res) => {
           <p>Item: ${order.style?.title}</p>
           <p>Total: ₦${order.totalPrice.toLocaleString()}</p>
           <p>Payment Reference: ${reference}</p>
+          <p>Delivering to: ${order.delivery?.address || 'N/A'} (${order.delivery?.phone || 'N/A'})</p>
+          ${order.delivery?.notes ? `<p>Landmark/notes: ${order.delivery.notes}</p>` : ''}
+          ${order.delivery?.location?.lat != null
+            ? `<p><a href="https://www.google.com/maps?q=${order.delivery.location.lat},${order.delivery.location.lng}">Open delivery pin in Google Maps</a></p>`
+            : ''}
           ${order.measurementRequest?.requested
             ? `<p>⚠️ <strong>ACTION REQUIRED:</strong> Customer paid for measurement service. Please schedule a tailor visit.</p>`
             : ''}
@@ -413,6 +445,7 @@ const formatOrderForAdminFrontend = (order) => ({
   totalPrice:           order.totalPrice,
   date:                 order.createdAt.toISOString().split('T')[0],
   notes:                order.notes,
+  delivery:             order.delivery,
   style:                order.style,
   material:             order.material,
   measurements:         order.measurements,

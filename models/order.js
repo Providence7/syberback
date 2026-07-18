@@ -47,6 +47,23 @@ const orderSchema = new mongoose.Schema({
 
   notes: { type: String, default: '' },
 
+  // ── Delivery (snapshotted from the customer's profile at order creation) ──
+  // Snapshotting instead of referencing the live User doc means editing a
+  // profile address later never silently changes where an already-placed
+  // order gets delivered — the order always ships to what was on file the
+  // moment it was paid for. `location` is optional (not every customer pins
+  // GPS); `notes` is a free-text landmark/gate-colour field for the rider,
+  // distinct from the style-customization `notes` field above.
+  delivery: {
+    phone:   { type: String, required: true },
+    address: { type: String, required: true },
+    location: {
+      lat: { type: Number, default: null },
+      lng: { type: Number, default: null },
+    },
+    notes: { type: String, default: '' },
+  },
+
   status: {
     type: String,
     enum: [
