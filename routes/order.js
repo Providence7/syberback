@@ -5,10 +5,12 @@ import rateLimit from 'express-rate-limit';
 
 import {
   createOrder,
+  createOrderGroup,
   getUserOrders,
   getOrderById,
   deleteOrder,
   verifyOrderPayment,
+  verifyGroupPayment,
   cancelOrder,
   getAdminOrders,
   getAdminOrderById,
@@ -20,8 +22,9 @@ import {
 
 const router = express.Router();
 
-// ── Rate limiter for payment endpoint ─────────────────────────────────────────
-// Each user is limited to 10 payment attempts per 15 minutes.
+// ── Rate limiter for payment endpoints ────────────────────────────────────────
+// Each user is limited to 10 payment attempts per 15 minutes. Shared between
+// the single-order and group-order payment routes.
 const paymentLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -52,13 +55,24 @@ router.put('/admin/:id',        protect, authorize(['admin']), updateOrderAdmin)
 router.patch('/admin/:id/status', protect, authorize(['admin']), updateOrderStatus);
 router.delete('/admin/:id',     protect, authorize(['admin']), deleteOrderAdmin);
 
+// ── Family / multi-person checkout ────────────────────────────────────────────
+// Must also come BEFORE the generic /:id routes so "group" is never matched
+// as an :id.
+//   POST /group           — creates one order per person, all sharing one
+//                            orderGroupId and one delivery snapshot.
+//   POST /group/:groupId/pay — verifies a single Paystack transaction against
+//                            the combined total of the whole group, then
+//                            marks every item paid together.
+router.post('/group',              protect, createOrderGroup);
+router.post('/group/:groupId/pay', protect, paymentLimiter, verifyGroupPayment);
+
 // ── User-facing routes ─────────────────────────────────────────────────────────
 router.post('/',      protect, createOrder);
 router.get('/',       protect, getUserOrders);
 router.get('/:id',    protect, getOrderById);
 router.delete('/:id', protect, deleteOrder);
 
-// ── Payment verification ───────────────────────────────────────────────────────
+// ── Payment verification (single order) ───────────────────────────────────────
 // Security layers:
 //   1. protect         — valid JWT/session cookie required
 //   2. paymentLimiter  — rate-limited per user to prevent abuse

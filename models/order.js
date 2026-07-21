@@ -34,10 +34,24 @@ const orderSchema = new mongoose.Schema({
     default: 'Online',
   },
 
+  // ── Family / multi-person checkout ────────────────────────────────────────
+  // When a customer orders for several people (e.g. a couple, a family) in
+  // one checkout, every resulting Order document shares the same
+  // orderGroupId. Each document still represents exactly one person's
+  // style + material + measurement, which keeps every other part of the
+  // system (admin views, single-order emails, cancellation) unchanged.
+  // recipientLabel is a free-text tag ("Mum", "Tolu", "Person 2") so the
+  // tailor and the admin dashboard can tell the items in a group apart.
+  orderGroupId:   { type: String, default: null, index: true },
+  recipientLabel: { type: String, default: '' },
+
   style:    { type: styleSchema,    required: true },
   material: { type: materialSchema, required: true },
 
-  measurements: { type: mongoose.Schema.Types.Mixed },
+  // A real saved measurement is now mandatory for every order — there is no
+  // body-build / silhouette fallback. Always an array (possibly length 1)
+  // for forward-compatibility with the frontend's measurement selector.
+  measurements: { type: mongoose.Schema.Types.Mixed, required: true },
 
   measurementRequest: {
     requested: { type: Boolean, default: false },
@@ -53,7 +67,8 @@ const orderSchema = new mongoose.Schema({
   // order gets delivered — the order always ships to what was on file the
   // moment it was paid for. `location` is optional (not every customer pins
   // GPS); `notes` is a free-text landmark/gate-colour field for the rider,
-  // distinct from the style-customization `notes` field above.
+  // distinct from the style-customization `notes` field above. All orders
+  // in the same group share one delivery snapshot (one household, one drop-off).
   delivery: {
     phone:   { type: String, required: true },
     address: { type: String, required: true },
@@ -92,12 +107,15 @@ const orderSchema = new mongoose.Schema({
   // ✅ NULL until payment is verified — set by controller, not by model hook
   expectedDeliveryDate: { type: Date, default: null },
 
-  paymentReference: { type: String, unique: true, sparse: true },
+  // Unique per order document. For a group checkout, the raw Paystack
+  // reference is shared across items, so each document stores a
+  // per-item-suffixed version here (to satisfy uniqueness) while the raw,
+  // shared reference is kept in groupPaymentReference for reuse-detection
+  // and lookups across the whole group.
+  paymentReference:      { type: String, unique: true, sparse: true },
+  groupPaymentReference: { type: String, default: null, index: true },
 
   paymentChannel: { type: String, default: 'card' },
-
-  measurementRequested: { type: Boolean, default: false },
-  requestedSize:        { type: String },
 
   // ── Cancellation ───────────────────────────────────────────────────────
   // Set by the client-facing cancelOrder controller. paymentStatus is left
