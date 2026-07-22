@@ -37,11 +37,19 @@ const buildDeliverySnapshot = (user, deliveryNotes) => ({
     : '',
 });
 
-// A saved measurement is mandatory for every item — no body-build fallback.
+// Each item needs EITHER a real saved measurement OR a chosen body build
+// (measurementRequested + requestedSize) — the two are alternatives, not
+// both required.
 const validateOrderItem = (item) => {
   if (!item || typeof item !== 'object') return 'Invalid order item.';
   if (!item.style || !item.material) return 'Each item requires a style and a material.';
-  if (!item.measurements) return 'Each item requires a saved measurement.';
+
+  const hasRealMeasurement = !!item.measurements;
+  const hasBodyBuild       = !!(item.measurementRequested && item.requestedSize);
+
+  if (!hasRealMeasurement && !hasBodyBuild) {
+    return 'Each item requires a saved measurement or a chosen body build.';
+  }
   return null;
 };
 
@@ -67,9 +75,12 @@ async function verifyPaystackTransaction(reference) {
 // below instead. orderGroupId is left null here.
 export const createOrder = async (req, res) => {
   try {
-    const { style, material, measurements, notes, deliveryNotes, paymentChannel, recipientLabel } = req.body;
+    const {
+      style, material, measurements, notes, deliveryNotes,
+      paymentChannel, recipientLabel, measurementRequested, requestedSize,
+    } = req.body;
 
-    const itemError = validateOrderItem({ style, material, measurements });
+    const itemError = validateOrderItem({ style, material, measurements, measurementRequested, requestedSize });
     if (itemError) {
       return res.status(400).json({ message: itemError });
     }
@@ -101,9 +112,11 @@ export const createOrder = async (req, res) => {
       customerEmail:        user.email,
       style,
       material,
-      measurements,
+      measurements:         measurements || null,
       notes:                notes || '',
       recipientLabel:       typeof recipientLabel === 'string' ? recipientLabel.trim().slice(0, MAX_RECIPIENT_LABEL_LENGTH) : '',
+      measurementRequested: !!measurementRequested,
+      requestedSize:        requestedSize || null,
       orderGroupId:         null,
       delivery:             buildDeliverySnapshot(user, deliveryNotes),
       totalPrice:           computedTotal,
@@ -130,9 +143,8 @@ export const createOrder = async (req, res) => {
 
 // ── POST /api/orders/group ────────────────────────────────────────────────────
 // Family / multi-person checkout: one shared delivery snapshot, one shared
-// orderGroupId, one order document per person. Every item must already have
-// a real saved measurement attached (validated client-side and re-checked
-// here) — there is no body-build/silhouette fallback for this flow.
+// orderGroupId, one order document per person. Each item independently
+// carries either a real saved measurement or a body-build choice.
 export const createOrderGroup = async (req, res) => {
   try {
     const { items, deliveryNotes, paymentChannel } = req.body;
@@ -168,13 +180,13 @@ export const createOrderGroup = async (req, res) => {
       });
     }
 
-    const orderGroupId    = crypto.randomUUID();
-    const sharedDelivery  = buildDeliverySnapshot(user, deliveryNotes);
+    const orderGroupId     = crypto.randomUUID();
+    const sharedDelivery   = buildDeliverySnapshot(user, deliveryNotes);
     const isMultiRecipient = items.length > 1;
 
     const createdOrders = [];
     for (let i = 0; i < items.length; i++) {
-      const { style, material, measurements, notes, recipientLabel } = items[i];
+      const { style, material, measurements, notes, recipientLabel, measurementRequested, requestedSize } = items[i];
 
       const order = await Order.create({
         user:                 req.user.id,
@@ -182,11 +194,13 @@ export const createOrderGroup = async (req, res) => {
         customerEmail:        user.email,
         style,
         material,
-        measurements,
+        measurements:         measurements || null,
         notes:                notes || '',
         recipientLabel:       typeof recipientLabel === 'string' && recipientLabel.trim()
                                 ? recipientLabel.trim().slice(0, MAX_RECIPIENT_LABEL_LENGTH)
                                 : (isMultiRecipient ? `Person ${i + 1}` : ''),
+        measurementRequested: !!measurementRequested,
+        requestedSize:        requestedSize || null,
         orderGroupId,
         delivery:             sharedDelivery,
         totalPrice:           calculateOrderTotal(style, material),
@@ -294,8 +308,8 @@ export const verifyOrderPayment = async (req, res) => {
       });
     }
 
-    order.paymentStatus        = 'paid';
-    order.paymentReference     = reference;
+    order.paymentStatus         = 'paid';
+    order.paymentReference      = reference;
     order.groupPaymentReference = reference;
     order.status               = 'in-progress';
     order.expectedDeliveryDate = addWorkingDays(new Date(), 7);
@@ -376,6 +390,9 @@ export const verifyOrderPayment = async (req, res) => {
           ${order.delivery?.notes ? `<p>Landmark/notes: ${order.delivery.notes}</p>` : ''}
           ${order.delivery?.location?.lat != null
             ? `<p><a href="https://www.google.com/maps?q=${order.delivery.location.lat},${order.delivery.location.lng}">Open delivery pin in Google Maps</a></p>`
+            : ''}
+          ${order.measurementRequested
+            ? `<p>👤 Customer used the body-build picker (${order.requestedSize || 'size not set'}) — no real measurement on file. Tailor to confirm before cutting.</p>`
             : ''}
           ${order.measurementRequest?.requested
             ? `<p>⚠️ <strong>ACTION REQUIRED:</strong> Customer paid for measurement service. Please schedule a tailor visit.</p>`
@@ -458,9 +475,9 @@ export const verifyGroupPayment = async (req, res) => {
       });
     }
 
-    const groupTotal      = orders.reduce((sum, o) => sum + o.totalPrice, 0);
-    const amountPaidKobo  = paystackData.data.amount;
-    const expectedKobo    = Math.round(groupTotal * 100);
+    const groupTotal     = orders.reduce((sum, o) => sum + o.totalPrice, 0);
+    const amountPaidKobo = paystackData.data.amount;
+    const expectedKobo   = Math.round(groupTotal * 100);
 
     if (amountPaidKobo !== expectedKobo) {
       await Order.updateMany({ orderGroupId: groupId }, { $set: { paymentStatus: 'failed' } });
@@ -522,9 +539,10 @@ export const verifyGroupPayment = async (req, res) => {
       // admin notification failed; payment itself is already confirmed above
     }
 
-    const itemListHtml = orders.map(o =>
-      `<li>${o.style?.title}${o.recipientLabel ? ` — for ${o.recipientLabel}` : ''} (₦${o.totalPrice.toLocaleString()})</li>`
-    ).join('');
+    const itemListHtml = orders.map(o => {
+      const buildNote = o.measurementRequested ? ` (body build: ${o.requestedSize || 'n/a'})` : '';
+      return `<li>${o.style?.title}${o.recipientLabel ? ` — for ${o.recipientLabel}` : ''}${buildNote} (₦${o.totalPrice.toLocaleString()})</li>`;
+    }).join('');
 
     try {
       await sendEmail({
@@ -727,6 +745,8 @@ const formatOrderForAdminFrontend = (order) => ({
   style:                order.style,
   material:             order.material,
   measurements:         order.measurements,
+  measurementRequested: order.measurementRequested,
+  requestedSize:        order.requestedSize,
   measurementRequest:   order.measurementRequest,
   paymentReference:     order.paymentReference,
   createdAt:            order.createdAt,

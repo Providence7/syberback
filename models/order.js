@@ -38,8 +38,8 @@ const orderSchema = new mongoose.Schema({
   // When a customer orders for several people (e.g. a couple, a family) in
   // one checkout, every resulting Order document shares the same
   // orderGroupId. Each document still represents exactly one person's
-  // style + material + measurement, which keeps every other part of the
-  // system (admin views, single-order emails, cancellation) unchanged.
+  // style + material + measurement/body-build, which keeps every other part
+  // of the system (admin views, single-order emails, cancellation) unchanged.
   // recipientLabel is a free-text tag ("Mum", "Tolu", "Person 2") so the
   // tailor and the admin dashboard can tell the items in a group apart.
   orderGroupId:   { type: String, default: null, index: true },
@@ -48,11 +48,19 @@ const orderSchema = new mongoose.Schema({
   style:    { type: styleSchema,    required: true },
   material: { type: materialSchema, required: true },
 
-  // A real saved measurement is now mandatory for every order — there is no
-  // body-build / silhouette fallback. Always an array (possibly length 1)
-  // for forward-compatibility with the frontend's measurement selector.
-  measurements: { type: mongoose.Schema.Types.Mixed, required: true },
+  // A real saved measurement is preferred, but not mandatory — a customer
+  // with no saved measurement can instead choose a body build (see
+  // measurementRequested/requestedSize below), so this stays optional.
+  measurements: { type: mongoose.Schema.Types.Mixed, default: null },
 
+  // Set when the customer had no real saved measurement and instead picked
+  // a body-build silhouette (Kid/Teenage/Average/Big/Plus) in the
+  // BodyBuildPicker. The tailor confirms exact measurements before cutting.
+  measurementRequested: { type: Boolean, default: false },
+  requestedSize:        { type: String, default: null },
+
+  // Legacy paid in-person measurement-visit service — distinct from the
+  // body-build picker above.
   measurementRequest: {
     requested: { type: Boolean, default: false },
     fee:       { type: Number,  default: 1500  },
