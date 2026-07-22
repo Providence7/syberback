@@ -1,6 +1,9 @@
 // src/models/measurement.js
 import mongoose from 'mongoose';
 
+const SIZE_VALUES = ['kid', 'small', 'medium', 'large', 'extraLarge'];
+const SIZE_LABELS = ['Kid', 'Small', 'Medium', 'Large', 'Extra Large'];
+
 const measurementSchema = new mongoose.Schema(
   {
     name:           { type: String, required: true },
@@ -13,21 +16,38 @@ const measurementSchema = new mongoose.Schema(
     unit:   { type: String, enum: ['in'], default: 'in' },
     gender: { type: String, enum: ['male', 'female'], lowercase: true },
 
-    // Machine-readable size key — used by the order form to look up materialQuantities
-    size: {
+    // Machine-readable size keys — used by the order form to look up
+    // materialQuantities per garment. Sized independently: a top and bottom
+    // don't have to land on the same size.
+    topSize: {
       type: String,
-      enum: ['kid', 'small', 'medium', 'large', 'extraLarge'],
+      enum: SIZE_VALUES,
       default: 'medium',
     },
-
-    // Human-readable label shown in the UI
-    sizeLabel: {
+    topSizeLabel: {
       type: String,
-      enum: ['Kid', 'Small', 'Medium', 'Large', 'Extra Large'],
+      enum: SIZE_LABELS,
+      default: 'Medium',
+    },
+    bottomSize: {
+      type: String,
+      enum: SIZE_VALUES,
+      default: 'medium',
+    },
+    bottomSizeLabel: {
+      type: String,
+      enum: SIZE_LABELS,
       default: 'Medium',
     },
 
-    age: { type: String },
+    // Optional age in years. Kept nullable (not required) since a profile can
+    // be created from measurements alone with no age given.
+    age: {
+      type: Number,
+      min: [0, 'Age cannot be negative'],
+      max: [120, 'Age must be a realistic value'],
+      default: null,
+    },
 
     // All raw measurement fields stored as a flexible map
     data: { type: mongoose.Schema.Types.Mixed },
@@ -52,4 +72,4 @@ measurementSchema.virtual('hasMeasurementData').get(function () {
   return Object.values(this.data).some(v => v !== '' && v !== null && v !== undefined);
 });
 
-export default mongoose.model('Measurement', measurementSchema);
+export default mongoose.model('Measurement', measurementSchema);                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        

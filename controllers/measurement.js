@@ -2,6 +2,14 @@
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
 
+// Coerce incoming age (always a string over multipart/form-data, possibly
+// missing or blank) into a Number the schema accepts, or null.
+const parseAge = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
 // ── POST /api/measurements ────────────────────────────────────────────────────
 export const createMeasurement = async (req, res) => {
   try {
@@ -20,7 +28,7 @@ export const createMeasurement = async (req, res) => {
       gender:         req.body.gender,
       size:           req.body.size,
       sizeLabel:      req.body.sizeLabel,
-      age:            req.body.age || '',
+      age:            parseAge(req.body.age),
       data:           JSON.parse(req.body.data || '{}'),
       photoUrl,
       photoPublicId,
@@ -32,6 +40,9 @@ export const createMeasurement = async (req, res) => {
     res.status(201).json(populated);
   } catch (err) {
     console.error('createMeasurement error:', err);
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ message: 'Validation failed', errors: Object.values(err.errors).map(e => e.message) });
+    }
     res.status(500).json({ error: err.message });
   }
 };
@@ -72,7 +83,7 @@ export const updateMeasurement = async (req, res) => {
       gender:    req.body.gender,
       size:      req.body.size,
       sizeLabel: req.body.sizeLabel,
-      age:       req.body.age || '',
+      age:       parseAge(req.body.age),
       data:      JSON.parse(req.body.data || '{}'),
     };
 
@@ -209,7 +220,7 @@ export const updateMeasurementAdmin = async (req, res) => {
     const { name, unit, gender, data, size, sizeLabel, age } = req.body;
     const update = {
       name, unit, gender, size, sizeLabel,
-      age:  age || '',
+      age:  parseAge(age),
       data: JSON.parse(data || '{}'),
     };
 
