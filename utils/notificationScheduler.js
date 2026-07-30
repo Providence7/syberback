@@ -137,7 +137,7 @@ export const scheduleOrderNotifications = async (order) => {
         return d;
       })();
 
-  console.log(`Scheduling notifications for Order ${orderId}. Expected delivery: ${deliveryDate.toLocaleDateString()}`);
+  // console.log(`Scheduling notifications for Order ${orderId}. Expected delivery: ${deliveryDate.toLocaleDateString()}`);
 
   // ── Fetch user once ────────────────────────────────────────────────────────
   const user = order.user ? await User.findById(order.user).lean() : null;
@@ -272,7 +272,7 @@ export const cancelOrderNotifications = (orderId) => {
  */
 export const rescheduleAllNotifications = async () => {
   try {
-    console.log('Initializing notification scheduler...');
+   
 
     const activeOrders = await Order.find({
       orderType:            'Online',
@@ -281,7 +281,7 @@ export const rescheduleAllNotifications = async () => {
       expectedDeliveryDate: { $gte: new Date() },
     }).lean();
 
-    console.log(`Found ${activeOrders.length} active orders to reschedule.`);
+    // console.log(`Found ${activeOrders.length} active orders to reschedule.`);
 
     for (const order of activeOrders) {
       await scheduleOrderNotifications(order);

@@ -1,7 +1,11 @@
 import mongoose from 'mongoose';
-import { CATEGORIES } from './constants/catergories.js';
+import { FABRIC_CATEGORIES } from './constants/catergories.js';
 const { Schema } = mongoose;
 
+// ─── Material → Unit mapping ───────────────────────────────────────────────
+// Single source of truth. The `unit` field is NEVER accepted from the client —
+// it's always derived from `material` right before validation/save, so it
+// can never drift out of sync no matter what a request body contains.
 export const MATERIAL_UNIT_MAP = {
     'Aso oke': 'cap',
     'Adire':   'yards',
@@ -15,8 +19,9 @@ export const MATERIAL_UNIT_MAP = {
 
 export const getUnitForMaterial = (material) => MATERIAL_UNIT_MAP[material] || 'trouser';
 
-// Re-exported so fabric.js consumers don't need a second import for the taxonomy.
-export const FABRIC_CATEGORIES = CATEGORIES;
+// Re-exported so controllers/admin pages can import categories from either
+// this file or constants/categories.js — both point at the same array.
+export { FABRIC_CATEGORIES };
 
 const FabricSchema = new Schema({
     title: { type: String, required: true, trim: true },
@@ -24,8 +29,8 @@ const FabricSchema = new Schema({
         type: String,
         required: [true, 'Category is required'],
         enum: {
-            values: CATEGORIES,
-            message: '{VALUE} is not a valid category',
+            values: FABRIC_CATEGORIES,
+            message: '{VALUE} is not a valid fabric category',
         },
     },
     material: {
