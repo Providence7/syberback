@@ -1,38 +1,22 @@
-import Style from '../models/styles.js';
+import Style, { STYLE_CATEGORIES } from '../models/styles.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { broadcastNotification } from '../utils/notifyUsers.js';
 import User from '../models/user.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Embed the chosen unit into every size value so the string is self-contained.
- * e.g. quantities = { small: "2", large: "3" }, unit = "yds"
- *   →  { small: "2 yds", large: "3 yds" }
- *
- * If a value already contains a space (unit already embedded), leave it alone.
- * If unit is empty / falsy, store the raw number string.
- */
 const applyUnit = (quantities, unit) => {
   if (!quantities || typeof quantities !== 'object') return {};
   const formatted = {};
   Object.entries(quantities).forEach(([size, value]) => {
     const v = String(value).trim();
-    if (!v) return; // skip empty sizes
+    if (!v) return;
     formatted[size] = unit && !v.includes(' ') ? `${v} ${unit}` : v;
   });
   return formatted;
 };
 
-// ---------------------------------------------------------------------------
-// @route   POST /api/styles
-// @desc    Add a new style (Admin only)
-// ---------------------------------------------------------------------------
 export const addStyle = async (req, res) => {
   const {
-    title, type, gender, ageGroup, price, description,
+    title, category, type, gender, ageGroup, price, description,
     details, colour, recommendedMaterials, materialQuantities,
     materialUnit, tags,
   } = req.body;
@@ -42,6 +26,11 @@ export const addStyle = async (req, res) => {
   try {
     if (!uploadedImage) {
       return res.status(400).json({ msg: 'No image file uploaded or upload failed.' });
+    }
+
+    if (!STYLE_CATEGORIES.includes(category)) {
+      if (uploadedImage.filename) await cloudinary.uploader.destroy(uploadedImage.filename);
+      return res.status(400).json({ msg: `Invalid category. Must be one of: ${STYLE_CATEGORIES.join(', ')}` });
     }
 
     const existingStyle = await Style.findOne({ title });
@@ -62,6 +51,7 @@ export const addStyle = async (req, res) => {
 
     const newStyle = new Style({
       title,
+      category,
       type: type ? type.split(',').map(s => s.trim()).filter(Boolean) : [],
       gender, ageGroup,
       price: Number(price),
@@ -77,7 +67,6 @@ export const addStyle = async (req, res) => {
 
     const style = await newStyle.save();
 
-    // ✅ Notify all users in real-time
     try {
       const io = req.app.get('io');
       const users = await User.find({}, '_id');
@@ -95,13 +84,14 @@ export const addStyle = async (req, res) => {
   } catch (err) {
     console.error('Error adding style:', err.message);
     if (uploadedImage?.filename) await cloudinary.uploader.destroy(uploadedImage.filename);
+    if (err.name === 'ValidationError') return res.status(400).json({ msg: err.message });
     res.status(500).send('Server Error');
   }
 };
 
 export const updateStyle = async (req, res) => {
   const {
-    title, type, gender, ageGroup, price, description,
+    title, category, type, gender, ageGroup, price, description,
     details, colour, recommendedMaterials, materialQuantities,
     materialUnit, tags,
   } = req.body;
@@ -112,6 +102,10 @@ export const updateStyle = async (req, res) => {
     let style = await Style.findById(req.params.id);
     if (!style) return res.status(404).json({ msg: 'Style not found' });
 
+    if (category !== undefined && !STYLE_CATEGORIES.includes(category)) {
+      return res.status(400).json({ msg: `Invalid category. Must be one of: ${STYLE_CATEGORIES.join(', ')}` });
+    }
+
     if (uploadedImage) {
       if (style.cloudinary_id) await cloudinary.uploader.destroy(style.cloudinary_id);
       style.image = uploadedImage.path;
@@ -120,6 +114,7 @@ export const updateStyle = async (req, res) => {
 
     const updateFields = {};
     if (title !== undefined)        updateFields.title        = title;
+    if (category !== undefined)     updateFields.category     = category;
     if (type !== undefined)         updateFields.type         = type.split(',').map(s => s.trim()).filter(Boolean);
     if (gender !== undefined)       updateFields.gender       = gender;
     if (ageGroup !== undefined)     updateFields.ageGroup     = ageGroup;
@@ -143,13 +138,16 @@ export const updateStyle = async (req, res) => {
       updateFields.tags = tags.split(',').map(s => s.trim()).filter(Boolean);
     }
 
+    if (uploadedImage) {
+      await style.save(); // persist the new image/cloudinary_id set above
+    }
+
     const updatedStyle = await Style.findByIdAndUpdate(
       req.params.id,
       { $set: updateFields },
       { new: true, runValidators: true },
     );
 
-    // ✅ Notify all users about the update
     try {
       const io = req.app.get('io');
       const users = await User.find({}, '_id');
@@ -166,16 +164,16 @@ export const updateStyle = async (req, res) => {
     res.json(updatedStyle);
   } catch (err) {
     console.error('Error updating style:', err.message);
+    if (err.name === 'ValidationError') return res.status(400).json({ msg: err.message });
     res.status(500).send('Server Error');
   }
 };
 
-// ---------------------------------------------------------------------------
-// @route   GET /api/styles
-// ---------------------------------------------------------------------------
 export const getStyles = async (req, res) => {
   try {
-    const styles = await Style.find().sort({ createdAt: -1 });
+    const { category } = req.query;
+    const filter = category ? { category } : {};
+    const styles = await Style.find(filter).sort({ createdAt: -1 });
     res.json(styles);
   } catch (err) {
     console.error(err.message);
@@ -183,9 +181,6 @@ export const getStyles = async (req, res) => {
   }
 };
 
-// ---------------------------------------------------------------------------
-// @route   GET /api/styles/:id
-// ---------------------------------------------------------------------------
 export const getStyleById = async (req, res) => {
   try {
     const style = await Style.findById(req.params.id);
@@ -195,9 +190,7 @@ export const getStyleById = async (req, res) => {
     res.status(500).send('Server Error');
   }
 };
-// ---------------------------------------------------------------------------
-// @route   DELETE /api/styles/:id
-// ---------------------------------------------------------------------------
+
 export const deleteStyle = async (req, res) => {
   try {
     const style = await Style.findById(req.params.id);

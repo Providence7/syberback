@@ -1,10 +1,9 @@
-// src/controllers/fabricController.js (Fixed version)
-import Fabric from '../models/fabric.js';
+// src/controllers/fabricController.js
+import Fabric, { FABRIC_CATEGORIES } from '../models/fabric.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { broadcastNotification } from '../utils/notifyUsers.js';
 import User from '../models/user.js';
 
-// Helper to extract public_id from Cloudinary URL (if not stored in DB)
 const getPublicIdFromUrl = (imageUrl) => {
     if (!imageUrl) return null;
     const parts = imageUrl.split('/');
@@ -17,21 +16,24 @@ const getPublicIdFromUrl = (imageUrl) => {
 // @access  Private (Admin)
 export const addFabric = async (req, res) => {
     const {
-        title, material, color, quality, price, description,
+        title, category, material, color, quality, price, description,
         details, width, weight, care, tags
     } = req.body;
 
-    const uploadedImage = req.file; // Contains Cloudinary response from multer-storage-cloudinary
+    const uploadedImage = req.file;
 
     try {
         if (!uploadedImage) {
             return res.status(400).json({ msg: 'No image file uploaded or upload failed.' });
         }
 
-        // Check if a fabric with the same title already exists
+        if (!FABRIC_CATEGORIES.includes(category)) {
+            try { await cloudinary.uploader.destroy(uploadedImage.filename); } catch {}
+            return res.status(400).json({ msg: `Invalid category. Must be one of: ${FABRIC_CATEGORIES.join(', ')}` });
+        }
+
         const existingFabric = await Fabric.findOne({ title });
         if (existingFabric) {
-            // If an image was uploaded, delete it from Cloudinary before sending error
             try {
                 await cloudinary.uploader.destroy(uploadedImage.filename);
             } catch (deleteError) {
@@ -40,7 +42,6 @@ export const addFabric = async (req, res) => {
             return res.status(400).json({ msg: 'A fabric with this title already exists.' });
         }
 
-        // Process tags - handle both string and array formats
         let processedTags = [];
         if (tags) {
             if (typeof tags === 'string') {
@@ -52,19 +53,20 @@ export const addFabric = async (req, res) => {
 
         const newFabric = new Fabric({
             title,
+            category,
             material,
             color,
             quality,
             price: Number(price),
-            image: uploadedImage.path, // Cloudinary secure_url
-            cloudinary_id: uploadedImage.filename, // Store the Cloudinary public_id
+            image: uploadedImage.path,
+            cloudinary_id: uploadedImage.filename,
             description,
             details,
             width,
             weight,
             care,
             tags: processedTags,
-            addedBy: req.user.id // Assuming req.user.id is populated by your auth middleware
+            addedBy: req.user.id
         });
 
         const fabric = await newFabric.save();
@@ -87,7 +89,6 @@ export const addFabric = async (req, res) => {
         });
     } catch (err) {
         console.error('Error adding fabric:', err.message);
-        // If an image was uploaded but saving to DB failed, delete it from Cloudinary
         if (uploadedImage && uploadedImage.filename) {
             try {
                 await cloudinary.uploader.destroy(uploadedImage.filename);
@@ -111,8 +112,7 @@ export const addFabric = async (req, res) => {
 };
 
 // @route   POST /api/fabrics/bulk
-// @desc    Bulk-create fabrics from an array of { title, ..., imageUrl }
-//          Cloudinary fetches each imageUrl server-side, so any public URL works.
+// @desc    Bulk-create fabrics from an array of { title, category, ..., imageUrl }
 // @access  Private (Admin)
 export const bulkCreateFabrics = async (req, res) => {
     const { fabrics } = req.body;
@@ -123,18 +123,20 @@ export const bulkCreateFabrics = async (req, res) => {
 
     const saved = [];
     const failed = [];
-    const seenTitles = new Set(); // guard against duplicate titles within the same batch
+    const seenTitles = new Set();
 
     for (const item of fabrics) {
         const {
-            title, material, color, quality, price, description,
+            title, category, material, color, quality, price, description,
             details, width, weight, care, tags, imageUrl
         } = item || {};
 
         try {
-            // Basic required-field validation (mirrors frontend gating)
             if (!title || !price || !description || !details || !width || !imageUrl) {
                 throw new Error('Missing required field(s): title, price, width, description, details, or imageUrl.');
+            }
+            if (!category || !FABRIC_CATEGORIES.includes(category)) {
+                throw new Error(`Invalid or missing category. Must be one of: ${FABRIC_CATEGORIES.join(', ')}`);
             }
 
             if (seenTitles.has(title)) {
@@ -146,7 +148,6 @@ export const bulkCreateFabrics = async (req, res) => {
                 throw new Error('A fabric with this title already exists.');
             }
 
-            // Cloudinary can ingest directly from a remote URL — no manual fetch needed
             const uploadResult = await cloudinary.uploader.upload(imageUrl, {
                 folder: 'fabrics',
             });
@@ -162,6 +163,7 @@ export const bulkCreateFabrics = async (req, res) => {
 
             const newFabric = new Fabric({
                 title,
+                category,
                 material,
                 color,
                 quality,
@@ -187,7 +189,6 @@ export const bulkCreateFabrics = async (req, res) => {
         }
     }
 
-    // One summary notification instead of spamming per-item
     if (saved.length > 0) {
         try {
             const io = req.app.get('io');
@@ -211,11 +212,13 @@ export const bulkCreateFabrics = async (req, res) => {
 };
 
 // @route   GET /api/fabrics
-// @desc    Get all fabrics
+// @desc    Get all fabrics, optionally filtered by ?category=
 // @access  Public
 export const getFabrics = async (req, res) => {
     try {
-        const fabrics = await Fabric.find().sort({ createdAt: -1 });
+        const { category } = req.query;
+        const filter = category ? { category } : {};
+        const fabrics = await Fabric.find(filter).sort({ createdAt: -1 });
         res.json({
             success: true,
             count: fabrics.length,
@@ -228,7 +231,6 @@ export const getFabrics = async (req, res) => {
 };
 
 // @route   GET /api/fabrics/:id
-// @desc    Get fabric by ID
 // @access  Public
 export const getFabricById = async (req, res) => {
     try {
@@ -250,15 +252,14 @@ export const getFabricById = async (req, res) => {
 };
 
 // @route   PUT /api/fabrics/:id
-// @desc    Update a fabric (Admin only), with optional image upload
 // @access  Private (Admin)
 export const updateFabric = async (req, res) => {
     const {
-        title, material, color, quality, price, description,
+        title, category, material, color, quality, price, description,
         details, width, weight, care, tags
     } = req.body;
 
-    const uploadedImage = req.file; // Contains Cloudinary response from multer-storage-cloudinary
+    const uploadedImage = req.file;
 
     try {
         let fabric = await Fabric.findById(req.params.id);
@@ -274,9 +275,11 @@ export const updateFabric = async (req, res) => {
             return res.status(404).json({ msg: 'Fabric not found' });
         }
 
-        // 1. Update image and cloudinary_id ONLY if a new image is uploaded
+        if (category !== undefined && !FABRIC_CATEGORIES.includes(category)) {
+            return res.status(400).json({ msg: `Invalid category. Must be one of: ${FABRIC_CATEGORIES.join(', ')}` });
+        }
+
         if (uploadedImage) {
-            // Delete old image from Cloudinary if it exists
             if (fabric.cloudinary_id) {
                 try {
                     await cloudinary.uploader.destroy(fabric.cloudinary_id);
@@ -284,7 +287,6 @@ export const updateFabric = async (req, res) => {
                     console.error('Error deleting old image:', deleteError);
                 }
             } else if (fabric.image) {
-                // Fallback for old fabrics that might not have cloudinary_id
                 const oldPublicId = getPublicIdFromUrl(fabric.image);
                 if (oldPublicId) {
                     try {
@@ -298,8 +300,8 @@ export const updateFabric = async (req, res) => {
             fabric.cloudinary_id = uploadedImage.filename;
         }
 
-        // 2. Update other text fields only if they are provided in the request body
         if (title !== undefined) fabric.title = title;
+        if (category !== undefined) fabric.category = category;
         if (material !== undefined) fabric.material = material;
         if (color !== undefined) fabric.color = color;
         if (quality !== undefined) fabric.quality = quality;
@@ -310,7 +312,6 @@ export const updateFabric = async (req, res) => {
         if (weight !== undefined) fabric.weight = weight;
         if (care !== undefined) fabric.care = care;
 
-        // Handle tags update
         if (tags !== undefined) {
             let processedTags = [];
             if (typeof tags === 'string') {
@@ -341,7 +342,6 @@ export const updateFabric = async (req, res) => {
         });
     } catch (err) {
         console.error('Error updating fabric:', err.message);
-        // If a new image was uploaded but DB update failed, delete the new image from Cloudinary
         if (uploadedImage && uploadedImage.filename) {
             try {
                 await cloudinary.uploader.destroy(uploadedImage.filename);
@@ -368,7 +368,6 @@ export const updateFabric = async (req, res) => {
 };
 
 // @route   DELETE /api/fabrics/:id
-// @desc    Delete a fabric (Admin only)
 // @access  Private (Admin)
 export const deleteFabric = async (req, res) => {
     try {
@@ -378,14 +377,13 @@ export const deleteFabric = async (req, res) => {
             return res.status(404).json({ msg: 'Fabric not found' });
         }
 
-        // Delete image from Cloudinary using the stored public_id
         if (fabric.cloudinary_id) {
             try {
                 await cloudinary.uploader.destroy(fabric.cloudinary_id);
             } catch (deleteError) {
                 console.error('Error deleting image from Cloudinary:', deleteError);
             }
-        } else if (fabric.image) { // Fallback if cloudinary_id wasn't stored
+        } else if (fabric.image) {
             const publicId = getPublicIdFromUrl(fabric.image);
             if (publicId) {
                 try {

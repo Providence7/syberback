@@ -1,5 +1,16 @@
 import mongoose from 'mongoose';
 
+// Single source of truth for the 6 categories. Import this wherever
+// category needs validating (controllers) or rendering (frontend tabs).
+export const STYLE_CATEGORIES = [
+  'Adire Casual',
+  'Aso Oke Luxury',
+  'Classic Senator',
+  'Cap',
+  'Accessories',
+  'Footwear',
+];
+
 const StyleSchema = new mongoose.Schema(
   {
     title: {
@@ -7,6 +18,14 @@ const StyleSchema = new mongoose.Schema(
       required: [true, 'Title is required'],
       unique: true,
       trim: true,
+    },
+    category: {
+      type: String,
+      required: [true, 'Category is required'],
+      enum: {
+        values: STYLE_CATEGORIES,
+        message: '{VALUE} is not a valid category',
+      },
     },
     type: {
       type: [String],
@@ -42,22 +61,12 @@ const StyleSchema = new mongoose.Schema(
       default: [],
     },
 
-    /**
-     * Each value is a self-contained string that already includes the unit,
-     * e.g. "2 yds", "1.5 trousers", "1 length (1 cap)".
-     * This makes the data portable — no need to look up the unit separately.
-     */
     materialQuantities: {
       type: Map,
       of: String,
       default: {},
     },
 
-    /**
-     * The measurement unit chosen by the admin for this style.
-     * Stored here so the edit form can pre-select the correct unit.
-     * Values: "yds" | "trousers" | "length (1 cap)"
-     */
     materialUnit: {
       type: String,
       default: 'yds',
@@ -74,6 +83,9 @@ const StyleSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// Helpful for querying/UI: quick lookup index
+StyleSchema.index({ category: 1 });
 
 const Style = mongoose.model('Style', StyleSchema);
 export default Style;

@@ -1,35 +1,10 @@
-/**
- * stylesBulkController.js
- *
- * Bulk-create styles.
- * Each item supplies either:
- *   - imageData  (base64 data-URI)  — used when frontend converts a local file
- *   - imageUrl   (any public URL)   — fetched server-side, no CORS issues
- *
- * All AI-generation code has been removed.
- */
-
-import Style   from '../models/styles.js';
+import Style, { STYLE_CATEGORIES } from '../models/styles.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { broadcastNotification } from '../utils/notifyUsers.js';
 import User    from '../models/user.js';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
 const MAX_REDIRECTS = 5;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Fetch any public image URL server-side into a Buffer.
- * Uses native fetch (Node 18+). Spoofs a browser User-Agent so
- * hotlink-protection checks are bypassed. Caps redirect chains at
- * MAX_REDIRECTS to prevent loops.
- *
- * @param {string} url
- * @param {number} [_depth]
- * @returns {Promise<{ buffer: Buffer, contentType: string }>}
- */
 async function fetchImageBuffer(url, _depth = 0) {
   if (_depth > MAX_REDIRECTS) {
     throw new Error(`fetchImageBuffer: too many redirects (max ${MAX_REDIRECTS}) for ${url}`);
@@ -66,13 +41,6 @@ async function fetchImageBuffer(url, _depth = 0) {
   return { buffer, contentType };
 }
 
-/**
- * Upload a raw Buffer to Cloudinary via upload_stream.
- *
- * @param {Buffer} buffer
- * @param {string} contentType
- * @returns {Promise<object>} Cloudinary upload result
- */
 function uploadBufferToCloudinary(buffer, contentType) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
@@ -83,12 +51,6 @@ function uploadBufferToCloudinary(buffer, contentType) {
   });
 }
 
-/**
- * Upload a base64 data-URI to Cloudinary.
- *
- * @param {string} dataUri
- * @returns {Promise<object>} Cloudinary upload result
- */
 function uploadBase64ToCloudinary(dataUri) {
   return new Promise((resolve, reject) => {
     cloudinary.uploader.upload(
@@ -99,10 +61,6 @@ function uploadBase64ToCloudinary(dataUri) {
   });
 }
 
-/**
- * Embed the chosen unit into every size value.
- * e.g. { small: "2" }, "yds"  →  { small: "2 yds" }
- */
 const applyUnit = (quantities, unit) => {
   if (!quantities || typeof quantities !== 'object') return {};
   const out = {};
@@ -114,13 +72,6 @@ const applyUnit = (quantities, unit) => {
   return out;
 };
 
-// ── Controller ────────────────────────────────────────────────────────────────
-
-/**
- * @route  POST /api/styles/bulk
- * @desc   Bulk-create styles. Accepts imageData (base64) OR imageUrl (any URL).
- * @access Private – Admin only
- */
 export const bulkAddStyles = async (req, res) => {
   const { styles: items } = req.body;
 
@@ -136,16 +87,19 @@ export const bulkAddStyles = async (req, res) => {
 
   for (const item of items) {
     const {
-      title, type, gender, ageGroup, price, colour,
+      title, category, type, gender, ageGroup, price, colour,
       description, details, recommendedMaterials, materialUnit,
       materialQuantities, tags,
-      imageData,   // base64 data-URI
-      imageUrl,    // public image URL — fetched server-side
+      imageData,
+      imageUrl,
     } = item;
 
-    // ── Basic validation ──────────────────────────────────────────────────
     if (!title || !price || !gender) {
       failed.push({ title: title || 'Unknown', error: 'Missing required fields (title, price, gender).' });
+      continue;
+    }
+    if (!category || !STYLE_CATEGORIES.includes(category)) {
+      failed.push({ title: title || 'Unknown', error: `Invalid or missing category. Must be one of: ${STYLE_CATEGORIES.join(', ')}` });
       continue;
     }
     if (!imageData && !imageUrl) {
@@ -154,16 +108,13 @@ export const bulkAddStyles = async (req, res) => {
     }
 
     try {
-      // ── Duplicate check ───────────────────────────────────────────────
       const existing = await Style.findOne({ title });
       if (existing) {
         failed.push({ title, error: 'A style with this title already exists.' });
         continue;
       }
 
-      // ── Upload to Cloudinary ──────────────────────────────────────────
       let cloudResult;
-
       if (imageData && imageData.startsWith('data:')) {
         cloudResult = await uploadBase64ToCloudinary(imageData);
       } else if (imageUrl) {
@@ -174,7 +125,6 @@ export const bulkAddStyles = async (req, res) => {
         continue;
       }
 
-      // ── Parse + normalise fields ──────────────────────────────────────
       const materialsArr = recommendedMaterials
         ? String(recommendedMaterials).split(',').map(s => s.trim()).filter(Boolean)
         : [];
@@ -196,9 +146,9 @@ export const bulkAddStyles = async (req, res) => {
         ? String(tags).split(',').map(s => s.trim()).filter(Boolean)
         : [];
 
-      // ── Save to MongoDB ───────────────────────────────────────────────
       const newStyle = new Style({
         title,
+        category,
         type:                 typeArr,
         gender,
         ageGroup:             ageGroup || 'Adult',
@@ -224,7 +174,6 @@ export const bulkAddStyles = async (req, res) => {
     }
   }
 
-  // ── Notify users (non-blocking) ───────────────────────────────────────────
   if (saved.length) {
     try {
       const io    = req.app.get('io');
