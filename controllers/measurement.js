@@ -1,13 +1,31 @@
 // src/controllers/measurement.js
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
+import { determineGarmentSizes, SIZE_MAP } from '../utils/sizeGude.js';
 
-// Coerce incoming age (always a string over multipart/form-data, possibly
-// missing or blank) into a Number the schema accepts, or null.
 const parseAge = (value) => {
   if (value === undefined || value === null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+};
+
+// Server-side single source of truth for garment sizes. Never trust
+// client-computed size fields — always recompute from the measurement
+// data + age that's actually being saved. This is what was missing
+// before: the client sent `topSize`/`bottomSize`/`topSizeLabel`/
+// `bottomSizeLabel`, the controller read `size`/`sizeLabel` (which were
+// never sent), so every record silently fell back to the schema default
+// of Medium/Medium.
+const computeSizes = (data, age) => {
+  const { topSize, bottomSize } = determineGarmentSizes({ ...data, age });
+  const top    = topSize    || SIZE_MAP.m;
+  const bottom = bottomSize || SIZE_MAP.m;
+  return {
+    topSize:         top.key,
+    topSizeLabel:    top.label,
+    bottomSize:      bottom.key,
+    bottomSizeLabel: bottom.label,
+  };
 };
 
 // ── POST /api/measurements ────────────────────────────────────────────────────
@@ -15,25 +33,23 @@ export const createMeasurement = async (req, res) => {
   try {
     const photoUrl       = req.file?.path     || null;
     const photoPublicId  = req.file?.filename || null;
-
-    // photoValidated is set to true only if an actual file was uploaded through
-    // our multer middleware (meaning it passed basic mime/size checks server-side).
-    // The client-side AI check is a UX guardrail; the flag here is a backend
-    // audit trail that the upload was genuine and went through our pipeline.
     const photoValidated = !!req.file;
 
+    const age  = parseAge(req.body.age);
+    const data = JSON.parse(req.body.data || '{}');
+    const sizes = computeSizes(data, age);
+
     const measurement = await Measurement.create({
-      name:           req.body.name,
-      unit:           req.body.unit,
-      gender:         req.body.gender,
-      size:           req.body.size,
-      sizeLabel:      req.body.sizeLabel,
-      age:            parseAge(req.body.age),
-      data:           JSON.parse(req.body.data || '{}'),
+      name:   req.body.name,
+      unit:   req.body.unit,
+      gender: req.body.gender,
+      age,
+      data,
+      ...sizes,
       photoUrl,
       photoPublicId,
       photoValidated,
-      user:           req.user.id,
+      user:   req.user.id,
     });
 
     const populated = await Measurement.findById(measurement._id).populate('user', 'name email');
@@ -77,14 +93,17 @@ export const getMeasurementById = async (req, res) => {
 // ── PUT /api/measurements/:id ─────────────────────────────────────────────────
 export const updateMeasurement = async (req, res) => {
   try {
+    const age  = parseAge(req.body.age);
+    const data = JSON.parse(req.body.data || '{}');
+    const sizes = computeSizes(data, age);
+
     const update = {
-      name:      req.body.name,
-      unit:      req.body.unit,
-      gender:    req.body.gender,
-      size:      req.body.size,
-      sizeLabel: req.body.sizeLabel,
-      age:       parseAge(req.body.age),
-      data:      JSON.parse(req.body.data || '{}'),
+      name:   req.body.name,
+      unit:   req.body.unit,
+      gender: req.body.gender,
+      age,
+      data,
+      ...sizes,
     };
 
     if (req.file) {
@@ -160,10 +179,12 @@ export const getAdminMeasurements = async (req, res) => {
 
       const userIds = matchingUsers.map(u => u._id);
 
+      // Was querying non-existent `size`/`sizeLabel` fields — the schema
+      // only has topSize/bottomSize (+ label variants). Search those.
       query.$or = [
-        { name:       { $regex: searchTerm, $options: 'i' } },
-        { size:       { $regex: searchTerm, $options: 'i' } },
-        { sizeLabel:  { $regex: searchTerm, $options: 'i' } },
+        { name:            { $regex: searchTerm, $options: 'i' } },
+        { topSizeLabel:    { $regex: searchTerm, $options: 'i' } },
+        { bottomSizeLabel: { $regex: searchTerm, $options: 'i' } },
       ];
       if (userIds.length > 0) query.$or.push({ user: { $in: userIds } });
     }
@@ -176,7 +197,6 @@ export const getAdminMeasurements = async (req, res) => {
       .skip(skip)
       .limit(parseInt(limit));
 
-    // Remove orphaned (deleted user) measurements on the fly
     const valid        = [];
     const orphanedIds  = [];
     for (const m of all) {
@@ -217,12 +237,12 @@ export const getAdminMeasurementById = async (req, res) => {
 // ── PUT /api/measurements/admin/:id ──────────────────────────────────────────
 export const updateMeasurementAdmin = async (req, res) => {
   try {
-    const { name, unit, gender, data, size, sizeLabel, age } = req.body;
-    const update = {
-      name, unit, gender, size, sizeLabel,
-      age:  parseAge(age),
-      data: JSON.parse(data || '{}'),
-    };
+    const { name, unit, gender, data: rawData, age: rawAge } = req.body;
+    const age  = parseAge(rawAge);
+    const data = JSON.parse(rawData || '{}');
+    const sizes = computeSizes(data, age);
+
+    const update = { name, unit, gender, age, data, ...sizes };
 
     if (req.file) {
       const old = await Measurement.findById(req.params.id).select('photoPublicId');
