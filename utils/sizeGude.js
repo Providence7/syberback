@@ -1,3 +1,11 @@
+// src/utils/sizeGuide.js
+//
+// Server-side copy of the size-scoring logic. This is the SINGLE SOURCE OF
+// TRUTH for topSize/bottomSize — the client (MeasurementFormPage) may also
+// compute a preview for the UI badge, but the server never trusts that
+// value. It always recomputes from the submitted `data` + `age` before
+// saving. Keep this in sync with the frontend's src/lib/sizeGuide.js if the
+// scoring rules ever change.
 
 export const SIZE_MAP = {
   k:  { key: 'kid',        label: 'Kid'         },
@@ -13,15 +21,17 @@ export const KID_AGE_CUTOFF = 13;
 
 const emptyScores = () => ({ k: 0, s: 0, m: 0, l: 0, xl: 0 });
 
-// Upper body: chest, back width, top length.
-// NOTE: topLength cutoffs below are placeholder estimates — confirm
-// against real order/size data and adjust before relying on this.
+// Upper body: chest, back width, AND top length (shoulder-to-hem) all vote.
+// NOTE: the topLength cutoffs below are placeholder estimates (evenly
+// spaced like the other bands) — confirm against real order/size data and
+// adjust before relying on this in production.
 const scoreUpperBody = (form) => {
   const scores = emptyScores();
   const chest     = parseFloat(form.chestCircumference) || 0;
   const back      = parseFloat(form.backWidth)          || 0;
   const topLength = parseFloat(form.topLength)          || 0;
 
+  // Chest/bust circumference, inches.
   if (chest > 0) {
     if      (chest < 32) scores.k++;
     else if (chest < 38) scores.s++;
@@ -30,6 +40,7 @@ const scoreUpperBody = (form) => {
     else                 scores.xl++;
   }
 
+  // Back width (shoulder to shoulder), inches.
   if (back > 0) {
     if      (back < 14) scores.k++;
     else if (back < 16) scores.s++;
@@ -38,6 +49,7 @@ const scoreUpperBody = (form) => {
     else                scores.xl++;
   }
 
+  // Top length (shoulder to hem), inches. PLACEHOLDER cutoffs — verify.
   if (topLength > 0) {
     if      (topLength < 22) scores.k++;
     else if (topLength < 26) scores.s++;
@@ -49,15 +61,18 @@ const scoreUpperBody = (form) => {
   return scores;
 };
 
-// Lower body: hips, trouser length. Waist is still collected/saved for the
-// actual cut but doesn't feed size scoring.
-// NOTE: trouserLength cutoffs below are placeholder estimates — confirm
-// against real order/size data and adjust before relying on this.
+// Lower body: hips AND trouser length vote. Waist is still collected and
+// saved (for the actual cut/pattern) but no longer feeds size scoring —
+// only these two do, per current instructions.
+// NOTE: the trouserLength cutoffs below are placeholder estimates —
+// confirm against real order/size data and adjust before relying on this
+// in production.
 const scoreLowerBody = (form) => {
   const scores = emptyScores();
   const hips          = parseFloat(form.hips)          || 0;
   const trouserLength = parseFloat(form.trouserLength) || 0;
 
+  // Hip/seat circumference, inches.
   if (hips > 0) {
     if      (hips < 30) scores.k++;
     else if (hips < 36) scores.s++;
@@ -66,6 +81,7 @@ const scoreLowerBody = (form) => {
     else                scores.xl++;
   }
 
+  // Trouser length (waist to ankle), inches. PLACEHOLDER cutoffs — verify.
   if (trouserLength > 0) {
     if      (trouserLength < 32) scores.k++;
     else if (trouserLength < 38) scores.s++;
@@ -91,27 +107,25 @@ const getLargestFitSize = (scoreObj) => {
   return SIZE_HIERARCHY[maxIndex];
 };
 
-const largerKey = (a, b) => {
-  if (!a) return b;
-  if (!b) return a;
-  return SIZE_HIERARCHY.indexOf(a) >= SIZE_HIERARCHY.indexOf(b) ? a : b;
-};
-
 // form: { age?, chestCircumference?, backWidth?, topLength?, hips?,
 //         trouserLength?, ... } (all measurements in inches)
 //
-// Returns a single SIZE_MAP entry, or null if there wasn't enough data at
-// all. Upper and lower body are scored separately internally, then the
-// LARGER of the two wins — one size, always erring toward not-too-small.
+// Returns { topSize, bottomSize } where each is a SIZE_MAP entry or null if
+// there wasn't enough info for that garment yet. topSize and bottomSize are
+// scored completely independently, so someone with a large chest and
+// medium hips (or the reverse) will correctly get different sizes for each
+// garment instead of one dragging the other.
 export const determineGarmentSizes = (form = {}) => {
   const ageNum = parseFloat(form.age);
   if (Number.isFinite(ageNum) && ageNum > 0 && ageNum < KID_AGE_CUTOFF) {
-    return SIZE_MAP.k;
+    return { topSize: SIZE_MAP.k, bottomSize: SIZE_MAP.k };
   }
 
-  const topKey    = getLargestFitSize(scoreUpperBody(form));
+  const topKey = getLargestFitSize(scoreUpperBody(form));
   const bottomKey = getLargestFitSize(scoreLowerBody(form));
-  const key       = largerKey(topKey, bottomKey);
 
-  return key ? SIZE_MAP[key] : null;
+  return {
+    topSize: topKey ? SIZE_MAP[topKey] : null,
+    bottomSize: bottomKey ? SIZE_MAP[bottomKey] : null,
+  };
 };
