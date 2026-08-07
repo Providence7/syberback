@@ -1,7 +1,7 @@
 // src/controllers/measurement.js
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
-import { determineGarmentSizes, SIZE_MAP } from '../utils/sizeGude.js';
+import { determineSize, SIZE_MAP } from '../utils/sizeGude.js';
 
 const parseAge = (value) => {
   if (value === undefined || value === null || value === '') return null;
@@ -9,22 +9,14 @@ const parseAge = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
-// Server-side single source of truth for garment sizes. Never trust
+// Server-side single source of truth for garment size. Never trust
 // client-computed size fields — always recompute from the measurement
-// data + age that's actually being saved. This is what was missing
-// before: the client sent `topSize`/`bottomSize`/`topSizeLabel`/
-// `bottomSizeLabel`, the controller read `size`/`sizeLabel` (which were
-// never sent), so every record silently fell back to the schema default
-// of Medium/Medium.
-const computeSizes = (data, age) => {
-  const { topSize, bottomSize } = determineGarmentSizes({ ...data, age });
-  const top    = topSize    || SIZE_MAP.m;
-  const bottom = bottomSize || SIZE_MAP.m;
+// data + age that's actually being saved.
+const computeSize = (data, age) => {
+  const size = determineSize({ ...data, age }) || SIZE_MAP.m;
   return {
-    topSize:         top.key,
-    topSizeLabel:    top.label,
-    bottomSize:      bottom.key,
-    bottomSizeLabel: bottom.label,
+    size:      size.key,
+    sizeLabel: size.label,
   };
 };
 
@@ -37,7 +29,7 @@ export const createMeasurement = async (req, res) => {
 
     const age  = parseAge(req.body.age);
     const data = JSON.parse(req.body.data || '{}');
-    const sizes = computeSizes(data, age);
+    const size = computeSize(data, age);
 
     const measurement = await Measurement.create({
       name:   req.body.name,
@@ -45,7 +37,7 @@ export const createMeasurement = async (req, res) => {
       gender: req.body.gender,
       age,
       data,
-      ...sizes,
+      ...size,
       photoUrl,
       photoPublicId,
       photoValidated,
@@ -95,7 +87,7 @@ export const updateMeasurement = async (req, res) => {
   try {
     const age  = parseAge(req.body.age);
     const data = JSON.parse(req.body.data || '{}');
-    const sizes = computeSizes(data, age);
+    const size = computeSize(data, age);
 
     const update = {
       name:   req.body.name,
@@ -103,7 +95,7 @@ export const updateMeasurement = async (req, res) => {
       gender: req.body.gender,
       age,
       data,
-      ...sizes,
+      ...size,
     };
 
     if (req.file) {
@@ -179,12 +171,9 @@ export const getAdminMeasurements = async (req, res) => {
 
       const userIds = matchingUsers.map(u => u._id);
 
-      // Was querying non-existent `size`/`sizeLabel` fields — the schema
-      // only has topSize/bottomSize (+ label variants). Search those.
       query.$or = [
-        { name:            { $regex: searchTerm, $options: 'i' } },
-        { topSizeLabel:    { $regex: searchTerm, $options: 'i' } },
-        { bottomSizeLabel: { $regex: searchTerm, $options: 'i' } },
+        { name:      { $regex: searchTerm, $options: 'i' } },
+        { sizeLabel: { $regex: searchTerm, $options: 'i' } },
       ];
       if (userIds.length > 0) query.$or.push({ user: { $in: userIds } });
     }
@@ -240,9 +229,9 @@ export const updateMeasurementAdmin = async (req, res) => {
     const { name, unit, gender, data: rawData, age: rawAge } = req.body;
     const age  = parseAge(rawAge);
     const data = JSON.parse(rawData || '{}');
-    const sizes = computeSizes(data, age);
+    const size = computeSize(data, age);
 
-    const update = { name, unit, gender, age, data, ...sizes };
+    const update = { name, unit, gender, age, data, ...size };
 
     if (req.file) {
       const old = await Measurement.findById(req.params.id).select('photoPublicId');

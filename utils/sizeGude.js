@@ -1,11 +1,11 @@
 // src/utils/sizeGuide.js
 //
 // Server-side copy of the size-scoring logic. This is the SINGLE SOURCE OF
-// TRUTH for topSize/bottomSize — the client (MeasurementFormPage) may also
-// compute a preview for the UI badge, but the server never trusts that
-// value. It always recomputes from the submitted `data` + `age` before
-// saving. Keep this in sync with the frontend's src/lib/sizeGuide.js if the
-// scoring rules ever change.
+// TRUTH for `size` — the client (MeasurementFormPage) may also compute a
+// preview for the UI badge, but the server never trusts that value. It
+// always recomputes from the submitted `data` + `age` before saving. Keep
+// this in sync with the frontend's src/lib/sizeGuide.js if the scoring
+// rules ever change.
 
 export const SIZE_MAP = {
   k:  { key: 'kid',        label: 'Kid'         },
@@ -34,9 +34,9 @@ const scoreUpperBody = (form) => {
   // Chest/bust circumference, inches.
   if (chest > 0) {
     if      (chest < 32) scores.k++;
-    else if (chest < 38) scores.s++;
-    else if (chest < 42) scores.m++;
-    else if (chest < 46) scores.l++;
+    else if (chest < 36) scores.s++;
+    else if (chest < 43) scores.m++;
+    else if (chest < 48) scores.l++;
     else                 scores.xl++;
   }
 
@@ -53,8 +53,8 @@ const scoreUpperBody = (form) => {
   if (topLength > 0) {
     if      (topLength < 22) scores.k++;
     else if (topLength < 26) scores.s++;
-    else if (topLength < 29) scores.m++;
-    else if (topLength < 32) scores.l++;
+    else if (topLength < 30) scores.m++;
+    else if (topLength < 35) scores.l++;
     else                     scores.xl++;
   }
 
@@ -83,7 +83,7 @@ const scoreLowerBody = (form) => {
 
   // Trouser length (waist to ankle), inches. PLACEHOLDER cutoffs — verify.
   if (trouserLength > 0) {
-    if      (trouserLength < 32) scores.k++;
+    if      (trouserLength < 30) scores.k++;
     else if (trouserLength < 38) scores.s++;
     else if (trouserLength < 41) scores.m++;
     else if (trouserLength < 44) scores.l++;
@@ -110,22 +110,29 @@ const getLargestFitSize = (scoreObj) => {
 // form: { age?, chestCircumference?, backWidth?, topLength?, hips?,
 //         trouserLength?, ... } (all measurements in inches)
 //
-// Returns { topSize, bottomSize } where each is a SIZE_MAP entry or null if
-// there wasn't enough info for that garment yet. topSize and bottomSize are
-// scored completely independently, so someone with a large chest and
-// medium hips (or the reverse) will correctly get different sizes for each
-// garment instead of one dragging the other.
-export const determineGarmentSizes = (form = {}) => {
+// Returns a SINGLE SIZE_MAP entry, or null if there wasn't enough info at
+// all. Upper and lower body are still scored independently internally
+// (so a large chest with small hips still gets weighed correctly), but
+// only one final size is returned to the caller: whichever of the two —
+// top or bottom — lands larger on the hierarchy. This is intentional:
+// showing clients two different sizes on one profile was confusing them.
+export const determineSize = (form = {}) => {
   const ageNum = parseFloat(form.age);
   if (Number.isFinite(ageNum) && ageNum > 0 && ageNum < KID_AGE_CUTOFF) {
-    return { topSize: SIZE_MAP.k, bottomSize: SIZE_MAP.k };
+    return SIZE_MAP.k;
   }
 
-  const topKey = getLargestFitSize(scoreUpperBody(form));
+  const topKey    = getLargestFitSize(scoreUpperBody(form));
   const bottomKey = getLargestFitSize(scoreLowerBody(form));
 
-  return {
-    topSize: topKey ? SIZE_MAP[topKey] : null,
-    bottomSize: bottomKey ? SIZE_MAP[bottomKey] : null,
-  };
+  const candidates = [topKey, bottomKey].filter(Boolean);
+  if (!candidates.length) return null;
+
+  let maxIndex = 0;
+  candidates.forEach((key) => {
+    const idx = SIZE_HIERARCHY.indexOf(key);
+    if (idx > maxIndex) maxIndex = idx;
+  });
+
+  return SIZE_MAP[SIZE_HIERARCHY[maxIndex]];
 };
