@@ -6,6 +6,11 @@ const styleSchema = new mongoose.Schema({
   price: Number,
   yardsRequired: Number,
   materialQuantityDisplay: String,
+  // ✅ NEW: snapshotted from Style.materialUnit at order time. Needed so the
+  // pre-validate check below (and any future audit/support lookup) can
+  // confirm the order was created with a compatible fabric — independent
+  // of whatever the live Style document says later.
+  materialUnit: String,
   recommendedMaterials: [String],
   image: { type: String, required: true },
 }, { _id: false });
@@ -14,6 +19,8 @@ const materialSchema = new mongoose.Schema({
   name: String,
   type: String,
   pricePerYard: Number,
+  // ✅ NEW: snapshotted from Fabric.unit at order time.
+  unit: String,
   color: String,
   description: String,
   image: { type: String, required: true },
@@ -34,33 +41,17 @@ const orderSchema = new mongoose.Schema({
     default: 'Online',
   },
 
-  // ── Family / multi-person checkout ────────────────────────────────────────
-  // When a customer orders for several people (e.g. a couple, a family) in
-  // one checkout, every resulting Order document shares the same
-  // orderGroupId. Each document still represents exactly one person's
-  // style + material + measurement/body-build, which keeps every other part
-  // of the system (admin views, single-order emails, cancellation) unchanged.
-  // recipientLabel is a free-text tag ("Mum", "Tolu", "Person 2") so the
-  // tailor and the admin dashboard can tell the items in a group apart.
   orderGroupId:   { type: String, default: null, index: true },
   recipientLabel: { type: String, default: '' },
 
   style:    { type: styleSchema,    required: true },
   material: { type: materialSchema, required: true },
 
-  // A real saved measurement is preferred, but not mandatory — a customer
-  // with no saved measurement can instead choose a body build (see
-  // measurementRequested/requestedSize below), so this stays optional.
   measurements: { type: mongoose.Schema.Types.Mixed, default: null },
 
-  // Set when the customer had no real saved measurement and instead picked
-  // a body-build silhouette (Kid/Teenage/Average/Big/Plus) in the
-  // BodyBuildPicker. The tailor confirms exact measurements before cutting.
   measurementRequested: { type: Boolean, default: false },
   requestedSize:        { type: String, default: null },
 
-  // Legacy paid in-person measurement-visit service — distinct from the
-  // body-build picker above.
   measurementRequest: {
     requested: { type: Boolean, default: false },
     fee:       { type: Number,  default: 1500  },
@@ -69,14 +60,6 @@ const orderSchema = new mongoose.Schema({
 
   notes: { type: String, default: '' },
 
-  // ── Delivery (snapshotted from the customer's profile at order creation) ──
-  // Snapshotting instead of referencing the live User doc means editing a
-  // profile address later never silently changes where an already-placed
-  // order gets delivered — the order always ships to what was on file the
-  // moment it was paid for. `location` is optional (not every customer pins
-  // GPS); `notes` is a free-text landmark/gate-colour field for the rider,
-  // distinct from the style-customization `notes` field above. All orders
-  // in the same group share one delivery snapshot (one household, one drop-off).
   delivery: {
     phone:   { type: String, required: true },
     address: { type: String, required: true },
@@ -105,43 +88,29 @@ const orderSchema = new mongoose.Schema({
     default: 'unpaid',
   },
 
-  // ✅ FIX: totalPrice is set explicitly on creation and NEVER recalculated
-  // on subsequent saves. Recalculation was causing the Paystack amount
-  // mismatch: controller sets paymentStatus='paid' then calls order.save(),
-  // the pre-save hook was recalculating totalPrice which could differ from
-  // what Paystack verified, making all future saves fail the amount check.
   totalPrice: { type: Number, required: true, min: 0 },
 
-  // ✅ NULL until payment is verified — set by controller, not by model hook
+  // ✅ NEW: delivery fee priced by distance from Iwo Road (see
+  // utils/transportFee.js). Already folded into totalPrice at order-creation
+  // time — stored separately here so receipts/admin views can show it as its
+  // own line without recomputing. For group orders this is each order's
+  // prorated share of one combined delivery fee for the whole group.
+  transportFee:        { type: Number, default: 0, min: 0 },
+  transportDistanceKm: { type: Number, default: null },
+
   expectedDeliveryDate: { type: Date, default: null },
 
-  // Unique per order document. For a group checkout, the raw Paystack
-  // reference is shared across items, so each document stores a
-  // per-item-suffixed version here (to satisfy uniqueness) while the raw,
-  // shared reference is kept in groupPaymentReference for reuse-detection
-  // and lookups across the whole group.
   paymentReference:      { type: String, unique: true, sparse: true },
   groupPaymentReference: { type: String, default: null, index: true },
 
   paymentChannel: { type: String, default: 'card' },
 
-  // ── Cancellation ───────────────────────────────────────────────────────
-  // Set by the client-facing cancelOrder controller. paymentStatus is left
-  // untouched on cancel — if the order was already paid, that history is
-  // preserved (refunds are a separate, unimplemented flow); if it was
-  // still unpaid, it simply never gets charged.
   cancellationReason: { type: String, default: null },
   cancelledAt:         { type: Date,   default: null },
 
 }, { timestamps: true });
 
-// ── Pre-save: ONLY auto-fill customer info on new documents ──────────────────
-// ✅ FIX: Removed totalPrice recalculation from pre-save entirely.
-//    Removed expectedDeliveryDate + status mutation from pre-save entirely.
-//    Both are now the sole responsibility of the controller after payment,
-//    preventing double-execution and race conditions.
 orderSchema.pre('save', async function (next) {
-  // Auto-fill customer name/email from User only when missing on new docs
   if (this.isNew && this.user && (!this.customerName || !this.customerEmail)) {
     try {
       const User = mongoose.model('User');
@@ -158,16 +127,47 @@ orderSchema.pre('save', async function (next) {
   next();
 });
 
+// ✅ NEW: last line of defense. Even if the frontend picker and the
+// controller-level check (assertFabricUnitCompatible, below) both somehow
+// get bypassed, no Order document can ever be saved with a style/material
+// unit mismatch — this fires on every .save() and Order.create() call.
+orderSchema.pre('validate', function (next) {
+  if (
+    this.style?.materialUnit &&
+    this.material?.unit &&
+    this.style.materialUnit !== this.material.unit
+  ) {
+    return next(new Error(
+      `Unit mismatch: "${this.style.title}" requires material priced per ${this.style.materialUnit}, ` +
+      `but "${this.material.name}" is priced per ${this.material.unit}.`
+    ));
+  }
+  next();
+});
+
 /**
- * Calculate total price for a new order.
- * Call this explicitly in the controller before Order.create(),
- * so the value stored in the DB exactly matches what Paystack charges.
+ * Throws if a style/material pair have incompatible units. Call this
+ * explicitly in the order controller BEFORE building the order payload,
+ * so you can return a clean 400 with a user-facing message instead of
+ * relying on the raw mongoose ValidationError from the hook above.
  *
- * @param {object} style       - style sub-document
- * @param {object} material    - material sub-document
- * @param {object} measurementRequest - { requested, fee }
- * @returns {number} total in Naira
+ * @param {object} style    - must include materialUnit
+ * @param {object} material - must include unit
  */
+export function assertFabricUnitCompatible(style, material) {
+  if (
+    style?.materialUnit &&
+    material?.unit &&
+    style.materialUnit !== material.unit
+  ) {
+    const err = new Error(
+      `"${material.name}" is priced per ${material.unit}, but "${style.title}" requires a material priced per ${style.materialUnit}.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 export function calculateOrderTotal(style, material, measurementRequest = {}) {
   const stylePrice           = parseFloat(style?.price)           || 0;
   const materialPricePerYard = parseFloat(material?.pricePerYard) || 0;
@@ -180,9 +180,6 @@ export function calculateOrderTotal(style, material, measurementRequest = {}) {
   return isNaN(total) ? 0 : total;
 }
 
-/**
- * Add N working days (Mon–Fri) to a date, skipping weekends.
- */
 export function addWorkingDays(startDate, days) {
   const date = new Date(startDate);
   let added = 0;

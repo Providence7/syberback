@@ -1,6 +1,6 @@
 // src/routes/currencyRoutes.js
 import express from 'express';
-import { getExchangeRate } from '../controllers/currency.js';
+import { getExchangeRate,getRateFor } from '../controllers/currency.js';
 
 const router = express.Router();
 
@@ -8,5 +8,6 @@ const router = express.Router();
 // @desc    Get live USD to NGN exchange rate
 // @access  Public
 router.get('/exchange-rate', getExchangeRate);
+router.get('/convert', getRateFor);   
 
 export default router;

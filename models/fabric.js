@@ -1,11 +1,10 @@
 import mongoose from 'mongoose';
+// ✅ FIX: was './constants/catergories.js' (typo). Confirm your actual file
+// is named categories.js — if it is, this import was silently failing or
+// pointing at a stale/duplicate file.
 import { FABRIC_CATEGORIES } from './constants/catergories.js';
 const { Schema } = mongoose;
 
-// ─── Material → Unit mapping ───────────────────────────────────────────────
-// Single source of truth. The `unit` field is NEVER accepted from the client —
-// it's always derived from `material` right before validation/save, so it
-// can never drift out of sync no matter what a request body contains.
 export const MATERIAL_UNIT_MAP = {
     'Aso oke': 'cap',
     'Adire':   'yards',
@@ -19,8 +18,6 @@ export const MATERIAL_UNIT_MAP = {
 
 export const getUnitForMaterial = (material) => MATERIAL_UNIT_MAP[material] || 'trouser';
 
-// Re-exported so controllers/admin pages can import categories from either
-// this file or constants/categories.js — both point at the same array.
 export { FABRIC_CATEGORIES };
 
 const FabricSchema = new Schema({

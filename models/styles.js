@@ -11,6 +11,14 @@ export const STYLE_CATEGORIES = [
   'Footwear',
 ];
 
+// Must match Fabric.js's `unit` enum exactly ('cap' | 'yards' | 'trouser').
+// This used to default to 'yds' — a value Fabric.unit could never equal —
+// which meant the unit-compatibility check silently never fired for any
+// style that hadn't explicitly set materialUnit. That's the root cause of
+// clients being able to pair Aso Oke Pants (needs 'cap') with Adire
+// (unit: 'yards') and getting 8 caps × Adire's per-yard price.
+export const STYLE_MATERIAL_UNITS = ['cap', 'yards', 'trouser'];
+
 const StyleSchema = new mongoose.Schema(
   {
     title: {
@@ -67,9 +75,17 @@ const StyleSchema = new mongoose.Schema(
       default: {},
     },
 
+    // Enum + correct default ('yards', not 'yds'). This is the field every
+    // incompatible-fabric bug traces back to — it must speak the same
+    // vocabulary as Fabric.unit or the comparison is meaningless.
     materialUnit: {
       type: String,
-      default: 'yds',
+      required: [true, 'materialUnit is required — it must match one of Fabric\'s unit values'],
+      enum: {
+        values: STYLE_MATERIAL_UNITS,
+        message: '{VALUE} is not a valid materialUnit — must be one of: cap, yards, trouser',
+      },
+      default: 'yards',
     },
 
     tags: {

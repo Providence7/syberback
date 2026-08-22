@@ -1,4 +1,4 @@
-import Style, { STYLE_CATEGORIES } from '../models/styles.js';
+import Style, { STYLE_CATEGORIES, STYLE_MATERIAL_UNITS } from '../models/styles.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { broadcastNotification } from '../utils/notifyUsers.js';
 import User    from '../models/user.js';
@@ -61,6 +61,10 @@ function uploadBase64ToCloudinary(dataUri) {
   });
 }
 
+// ✅ FIX: default changed from 'yds' → 'yards' so a style saved without an
+// explicit unit in the display string still matches what Fabric.unit and
+// Style.materialUnit actually use ('cap' | 'yards' | 'trouser'). 'yds' was
+// never a real unit value anywhere else in the system.
 const applyUnit = (quantities, unit) => {
   if (!quantities || typeof quantities !== 'object') return {};
   const out = {};
@@ -102,6 +106,22 @@ export const bulkAddStyles = async (req, res) => {
       failed.push({ title: title || 'Unknown', error: `Invalid or missing category. Must be one of: ${STYLE_CATEGORIES.join(', ')}` });
       continue;
     }
+
+    // ✅ FIX: validate materialUnit up front, with a clear per-item error,
+    // instead of letting a bad/missing value reach Style.save() and come
+    // back as an opaque Mongoose ValidationError. This is what actually
+    // stops the "8 caps priced as 8 yards of Adire" bug at the source for
+    // bulk-uploaded styles: a style can no longer be created with a unit
+    // that doesn't correspond to a real Fabric.unit value.
+    const resolvedUnit = materialUnit || 'yards';
+    if (!STYLE_MATERIAL_UNITS.includes(resolvedUnit)) {
+      failed.push({
+        title: title || 'Unknown',
+        error: `Invalid materialUnit "${resolvedUnit}". Must be one of: ${STYLE_MATERIAL_UNITS.join(', ')} (e.g. Aso Oke styles → "cap", Adire/Senator/African Prints → "yards").`,
+      });
+      continue;
+    }
+
     if (!imageData && !imageUrl) {
       failed.push({ title: title || 'Unknown', error: 'No image provided (imageData or imageUrl required).' });
       continue;
@@ -136,7 +156,7 @@ export const bulkAddStyles = async (req, res) => {
         try { parsedQty = JSON.parse(materialQuantities); } catch { parsedQty = {}; }
       }
 
-      const finalQty = applyUnit(parsedQty, materialUnit || 'yds');
+      const finalQty = applyUnit(parsedQty, resolvedUnit);
 
       const typeArr = type
         ? String(type).split(',').map(s => s.trim()).filter(Boolean)
@@ -160,13 +180,15 @@ export const bulkAddStyles = async (req, res) => {
         colour:               colour || '',
         recommendedMaterials: materialsArr,
         materialQuantities:   finalQty,
-        materialUnit:         materialUnit || 'yds',
+        // ✅ FIX: was `materialUnit || 'yds'` — now uses the validated,
+        // schema-compatible resolvedUnit computed above.
+        materialUnit:         resolvedUnit,
         tags:                 tagsArr,
         addedBy:              req.user.id,
       });
 
       const style = await newStyle.save();
-      saved.push({ title: style.title, _id: style._id });
+      saved.push({ title: style.title, _id: style._id, materialUnit: style.materialUnit });
 
     } catch (err) {
       console.error(`Bulk: error on "${title}":`, err.message);

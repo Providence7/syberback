@@ -6,6 +6,7 @@ import Notification from '../models/notification.js';
 import { sendEmail } from '../utils/email.js';
 import { scheduleOrderNotifications, cancelOrderNotifications } from '../utils/notificationScheduler.js';
 import { notifyUser, broadcastNotification } from '../utils/notifyUsers.js';
+import { getTransportFeeFromIwoRoad } from '../utils/transportFee.js';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -103,8 +104,22 @@ export const createOrder = async (req, res) => {
         message: 'Please add a delivery address to your profile before placing an order.',
       });
     }
+    // ✅ NEW: a GPS pin is required to price delivery. Checked separately
+    // from address so the error message can point the customer at the
+    // right fix (re-saving their pin, not retyping their address).
+    if (user.location?.lat == null || user.location?.lng == null) {
+      return res.status(400).json({
+        message: 'Please save your delivery location (GPS pin) on your profile before placing an order — it\'s how we calculate your delivery fee.',
+      });
+    }
 
-    const computedTotal = calculateOrderTotal(style, material);
+    // ✅ NEW: transport fee, priced by distance from Iwo Road.
+    const { distanceKm, fee: transportFee } = getTransportFeeFromIwoRoad(
+      user.location.lat,
+      user.location.lng
+    );
+
+    const computedTotal = calculateOrderTotal(style, material) + transportFee;
 
     const order = await Order.create({
       user:                 req.user.id,
@@ -120,6 +135,8 @@ export const createOrder = async (req, res) => {
       orderGroupId:         null,
       delivery:             buildDeliverySnapshot(user, deliveryNotes),
       totalPrice:           computedTotal,
+      transportFee,                          // ✅ NEW
+      transportDistanceKm:  distanceKm,       // ✅ NEW
       orderType:            'Online',
       paymentChannel:       paymentChannel || 'card',
       status:               'pendingPayment',
@@ -179,14 +196,33 @@ export const createOrderGroup = async (req, res) => {
         message: 'Please add a delivery address to your profile before placing an order.',
       });
     }
+    // ✅ NEW
+    if (user.location?.lat == null || user.location?.lng == null) {
+      return res.status(400).json({
+        message: 'Please save your delivery location (GPS pin) on your profile before placing an order — it\'s how we calculate your delivery fee.',
+      });
+    }
 
     const orderGroupId     = crypto.randomUUID();
     const sharedDelivery   = buildDeliverySnapshot(user, deliveryNotes);
     const isMultiRecipient = items.length > 1;
 
+    // ✅ NEW: one combined transport fee for the whole group (single
+    // delivery, single address), split across items so each order's
+    // totalPrice — and therefore the sum Paystack is asked to verify —
+    // still adds up exactly. Any rounding remainder goes to the first item.
+    const { distanceKm, fee: transportFeeTotal } = getTransportFeeFromIwoRoad(
+      user.location.lat,
+      user.location.lng
+    );
+    const perItemTransportFee = Math.floor(transportFeeTotal / items.length);
+    const transportFeeRemainder = transportFeeTotal - (perItemTransportFee * items.length);
+
     const createdOrders = [];
     for (let i = 0; i < items.length; i++) {
       const { style, material, measurements, notes, recipientLabel, measurementRequested, requestedSize } = items[i];
+
+      const itemTransportFee = perItemTransportFee + (i === 0 ? transportFeeRemainder : 0);
 
       const order = await Order.create({
         user:                 req.user.id,
@@ -203,7 +239,9 @@ export const createOrderGroup = async (req, res) => {
         requestedSize:        requestedSize || null,
         orderGroupId,
         delivery:             sharedDelivery,
-        totalPrice:           calculateOrderTotal(style, material),
+        totalPrice:           calculateOrderTotal(style, material) + itemTransportFee,
+        transportFee:         itemTransportFee,   // ✅ NEW
+        transportDistanceKm:  distanceKm,          // ✅ NEW
         orderType:            'Online',
         paymentChannel:       paymentChannel || 'card',
         status:               'pendingPayment',
@@ -355,6 +393,9 @@ export const verifyOrderPayment = async (req, res) => {
     }
 
     try {
+      // ✅ NEW: item cost split out from the delivery fee for clarity.
+      const itemOnlyCost = order.totalPrice - order.transportFee;
+
       await sendEmail({
         to:      order.customerEmail,
         subject: 'Payment Successful! Your Order is Confirmed',
@@ -363,6 +404,8 @@ export const verifyOrderPayment = async (req, res) => {
           <p>Dear ${order.customerName},</p>
           <p>Your payment for <strong>${order.style?.title}</strong> (Order ID: ${order._id})
              of ₦${order.totalPrice.toLocaleString()} has been received.</p>
+          <p>Item cost: ₦${itemOnlyCost.toLocaleString()}<br>
+             Delivery fee: ₦${order.transportFee.toLocaleString()}</p>
           ${order.measurementRequest?.requested
             ? `<p>📏 You requested our measurement service. A tailor will contact you within 24 hours.</p>`
             : ''}
@@ -384,7 +427,7 @@ export const verifyOrderPayment = async (req, res) => {
           <p>Order ID: ${order._id}</p>
           <p>Customer: ${order.customerName} (${order.customerEmail})</p>
           <p>Item: ${order.style?.title}</p>
-          <p>Total: ₦${order.totalPrice.toLocaleString()}</p>
+          <p>Total: ₦${order.totalPrice.toLocaleString()} (delivery fee: ₦${order.transportFee.toLocaleString()}${order.transportDistanceKm != null ? `, ~${order.transportDistanceKm.toFixed(1)}km from Iwo Road` : ''})</p>
           <p>Payment Reference: ${reference}</p>
           <p>Delivering to: ${order.delivery?.address || 'N/A'} (${order.delivery?.phone || 'N/A'})</p>
           ${order.delivery?.notes ? `<p>Landmark/notes: ${order.delivery.notes}</p>` : ''}
@@ -539,10 +582,16 @@ export const verifyGroupPayment = async (req, res) => {
       // admin notification failed; payment itself is already confirmed above
     }
 
+    // ✅ NEW: strip each item's prorated delivery share out of its display
+    // price, and show the combined fee once below the list instead.
     const itemListHtml = orders.map(o => {
-      const buildNote = o.measurementRequested ? ` (body build: ${o.requestedSize || 'n/a'})` : '';
-      return `<li>${o.style?.title}${o.recipientLabel ? ` — for ${o.recipientLabel}` : ''}${buildNote} (₦${o.totalPrice.toLocaleString()})</li>`;
+      const buildNote    = o.measurementRequested ? ` (body build: ${o.requestedSize || 'n/a'})` : '';
+      const itemOnlyCost = o.totalPrice - o.transportFee;
+      return `<li>${o.style?.title}${o.recipientLabel ? ` — for ${o.recipientLabel}` : ''}${buildNote} (₦${itemOnlyCost.toLocaleString()})</li>`;
     }).join('');
+
+    const combinedTransportFee = orders.reduce((sum, o) => sum + o.transportFee, 0);
+    const combinedDistanceKm   = orders[0]?.transportDistanceKm ?? null;
 
     try {
       await sendEmail({
@@ -553,6 +602,7 @@ export const verifyGroupPayment = async (req, res) => {
           <p>Dear ${orders[0].customerName},</p>
           <p>Your payment of ₦${groupTotal.toLocaleString()} for the following item(s) has been received:</p>
           <ul>${itemListHtml}</ul>
+          <p>Delivery fee: ₦${combinedTransportFee.toLocaleString()}</p>
           <p>Expected delivery: <strong>${deliveryLabel}</strong>.</p>
           <p>Transaction Reference: ${reference}</p>
           <p>You can view all items from the Orders page in your account.</p>
@@ -571,6 +621,7 @@ export const verifyGroupPayment = async (req, res) => {
           <p>Customer: ${orders[0].customerName} (${orders[0].customerEmail})</p>
           <ul>${itemListHtml}</ul>
           <p>Total: ₦${groupTotal.toLocaleString()}</p>
+          <p>Delivery fee: ₦${combinedTransportFee.toLocaleString()}${combinedDistanceKm != null ? ` (~${combinedDistanceKm.toFixed(1)}km from Iwo Road)` : ''}</p>
           <p>Payment Reference: ${reference}</p>
           <p>Delivering to: ${orders[0].delivery?.address || 'N/A'} (${orders[0].delivery?.phone || 'N/A'})</p>
           ${orders[0].delivery?.notes ? `<p>Landmark/notes: ${orders[0].delivery.notes}</p>` : ''}
@@ -739,6 +790,8 @@ const formatOrderForAdminFrontend = (order) => ({
   status:               order.status,
   paymentStatus:        order.paymentStatus,
   totalPrice:           order.totalPrice,
+  transportFee:         order.transportFee,          // ✅ NEW
+  transportDistanceKm:  order.transportDistanceKm,   // ✅ NEW
   date:                 order.createdAt.toISOString().split('T')[0],
   notes:                order.notes,
   delivery:             order.delivery,
