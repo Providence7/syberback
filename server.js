@@ -6,7 +6,7 @@ import http       from 'http';
 import connectDB  from './config/db.js';
 
 import * as security from './middlewares/security.js';
-
+import photoAnalysisRoutes from './routes/photoanalysisroute.js';
 import authRoutes         from './routes/authRoutes.js';
 import measurementRoutes  from './routes/measurement.js';
 import inpersonRoute      from './routes/inpersonRoutes.js';
@@ -88,6 +88,7 @@ app.use('/api/orders',       orderRoutes);
 
 // ── K. Public routes ──────────────────────────────────────────────────────────
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/photo-analysis', photoAnalysisRoutes);
 app.use('/api/currency',      currencyRoutes);
 app.use('/api/styles',        styleRoutes);
 app.use('/api/fabrics',       fabricRoutes);

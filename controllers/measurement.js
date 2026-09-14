@@ -2,7 +2,7 @@
 import OpenAI from 'openai';
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
-import { determineSize, SIZE_MAP } from '../utils/sizeGude.js';
+import { determineSize, SIZE_MAP } from '../utils/sizeGuide.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
