@@ -4,8 +4,8 @@ import cookieParser from 'cookie-parser';
 import cors       from 'cors';
 import http       from 'http';
 import connectDB  from './config/db.js';
-
 import * as security from './middlewares/security.js';
+import { handlePaystackWebhook } from './controllers/paystackWebhookController.js';                                                                                                  
 import photoAnalysisRoutes from './routes/photoanalysisroute.js';
 import authRoutes         from './routes/authRoutes.js';
 import measurementRoutes  from './routes/measurement.js';
@@ -57,7 +57,7 @@ app.post(
   express.raw({ type: 'application/json' }),
   (req, res, next) => { req.rawBody = req.body; next(); },
   security.verifyPaystackWebhook,
-  (req, res) => res.status(200).send('OK')
+  handlePaystackWebhook
 );
 
 // ── F. Body parsers ───────────────────────────────────────────────────────────

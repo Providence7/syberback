@@ -8,6 +8,8 @@ import crypto from 'crypto';
 
 // ─────────────────────────────────────────────
 // 1. Security Headers
+// (CSP here only covers responses from THIS host. For the SPA, send a CSP
+// from the host that serves the HTML.)
 // ─────────────────────────────────────────────
 export function securityHeaders(req, res, next) {
   res.setHeader(
@@ -21,6 +23,7 @@ export function securityHeaders(req, res, next) {
       "img-src 'self' data: https://paystack.com",
       "object-src 'none'",
       "base-uri 'self'",
+      "frame-ancestors 'none'",
       "upgrade-insecure-requests",
     ].join('; ')
   );
@@ -42,35 +45,49 @@ export function securityHeaders(req, res, next) {
 
 // ─────────────────────────────────────────────
 // 2. Rate Limiters
+// Many Nigerian mobile users share one IP (carrier-grade NAT), so per-IP
+// caps must be generous. Brute-force protection for auth lives in
+// rateLimiters.js (per-email + per-IP on each sensitive route).
 // ─────────────────────────────────────────────
 export const paymentRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  limit: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many payment attempts. Try again later.' },
-  keyGenerator: (req) => req.ip,
   skip: (req) => req.path.includes('/webhooks/'),
 });
 
 export const generalRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  limit: 600,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many requests. Please slow down.' },
 });
 
+// DEPRECATED: do NOT mount on the whole /api/auth prefix. It would throttle
+// session probes and admin dashboard calls. Use the per-route limiters in
+// rateLimiters.js instead. Kept exported so existing imports don't break.
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: process.env.NODE_ENV === 'production' ? 20 : 100,
+  limit: process.env.NODE_ENV === 'production' ? 20 : 100,
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 // ─────────────────────────────────────────────
-// 3. Strict Origin Check
+// 3. Strict Origin Check (CSRF defence for cookie auth)
+// Exact origin match. Fails closed in production if CLIENT_URL is unset.
 // ─────────────────────────────────────────────
+const toOrigin = (value) => {
+  try {
+    return new URL(value.trim()).origin;
+  } catch {
+    return null;
+  }
+};
+
 export function strictOriginCheck(req, res, next) {
   const mutatingMethods = ['POST', 'PUT', 'PATCH', 'DELETE'];
 
@@ -86,16 +103,18 @@ export function strictOriginCheck(req, res, next) {
 
   const allowedOrigins = (process.env.CLIENT_URL || '')
     .split(',')
-    .map((url) => url.trim())
+    .map(toOrigin)
     .filter(Boolean);
 
   if (!allowedOrigins.length) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[security:origin] CLIENT_URL is not set; rejecting request');
+      return res.status(403).json({ message: 'Forbidden.' });
+    }
     return next();
   }
 
-  const allowed = allowedOrigins.some((url) => origin.startsWith(url));
-
-  if (!allowed) {
+  if (!allowedOrigins.includes(origin)) {
     return res.status(403).json({ message: 'Forbidden.' });
   }
 
@@ -103,32 +122,41 @@ export function strictOriginCheck(req, res, next) {
 }
 
 // ─────────────────────────────────────────────
-// 4. Mongo Sanitizer
+// 4. Mongo Sanitizer (body + query)
+// Strips operator keys ($ne, $gt, ...) and prototype-pollution keys.
+// req.params is intentionally not handled: it is empty when this runs
+// as global middleware.
 // ─────────────────────────────────────────────
-function sanitizeValue(value) {
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const isUnsafeKey = (key) => key.startsWith('$') || UNSAFE_KEYS.has(key);
+
+function sanitizeInPlace(value) {
   if (Array.isArray(value)) {
-    return value.map(sanitizeValue);
+    value.forEach(sanitizeInPlace);
+    return value;
   }
-
   if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(
-          ([key]) =>
-            !key.startsWith('$') &&
-            key !== '__proto__' &&
-            key !== 'constructor'
-        )
-        .map(([key, val]) => [key, sanitizeValue(val)])
-    );
+    for (const key of Object.keys(value)) {
+      if (isUnsafeKey(key)) delete value[key];
+      else sanitizeInPlace(value[key]);
+    }
   }
-
   return value;
 }
 
 export function sanitizeMongo(req, res, next) {
-  if (req.body)   req.body   = sanitizeValue(req.body);
-  if (req.params) req.params = sanitizeValue(req.params);
+  if (req.body) sanitizeInPlace(req.body);
+
+  // Express 5 re-parses req.query on every access and has no setter, so pin
+  // the sanitized object as an own property (also fine on Express 4).
+  const query = sanitizeInPlace(req.query);
+  Object.defineProperty(req, 'query', {
+    value: query,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+
   next();
 }
 
@@ -136,6 +164,7 @@ export const sanitizeHpp = hpp();
 
 // ─────────────────────────────────────────────
 // 5. Paystack Webhook Verify
+// Requires the raw body: express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } })
 // ─────────────────────────────────────────────
 export function verifyPaystackWebhook(req, res, next) {
   const signature = req.headers['x-paystack-signature'];
@@ -144,12 +173,22 @@ export function verifyPaystackWebhook(req, res, next) {
     return res.status(401).json({ message: 'Missing webhook signature.' });
   }
 
-  const hash = crypto
+  if (!process.env.PAYSTACK_SECRET_KEY || !req.rawBody) {
+    console.error(
+      '[security:paystack-webhook] PAYSTACK_SECRET_KEY or req.rawBody missing ' +
+      '(capture rawBody in the express.json verify option)'
+    );
+    return res.status(500).json({ message: 'Webhook verification unavailable.' });
+  }
+
+  const expected = crypto
     .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
     .update(req.rawBody)
-    .digest('hex');
+    .digest();
 
-  if (hash !== signature) {
+  const received = Buffer.from(String(signature), 'hex');
+
+  if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) {
     return res.status(401).json({ message: 'Invalid webhook signature.' });
   }
 

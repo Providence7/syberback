@@ -1,5 +1,4 @@
 // src/controllers/authController.js
-import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import ms from 'ms';
@@ -19,12 +18,38 @@ dotenv.config();
 // ------------------------------
 const randomToken = (length = 32) => crypto.randomBytes(length).toString('hex');
 
+// One-way hash for anything secret we store (refresh + reset tokens).
+// The raw value only ever lives in the cookie / email link.
+const hashToken = (token) =>
+  crypto.createHash('sha256').update(String(token)).digest('hex');
+
+// 6-digit code from a CSPRNG
+const generateEmailCode = () => crypto.randomInt(100000, 1000000).toString();
+
+// Logs the full error with a scope tag. Never pass req.body or tokens here.
+const logError = (scope, error) => {
+  console.error(`[auth:${scope}]`, error);
+};
+
+// Expected token failures (expired/invalid) are normal, not errors
+const isJwtError = (e) =>
+  e?.name === 'JsonWebTokenError' ||
+  e?.name === 'TokenExpiredError' ||
+  e?.name === 'NotBeforeError';
+
 const getCookieOptions = () => ({
   httpOnly: true,
   secure: process.env.NODE_ENV === 'production',
   sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
   path: '/',
 });
+
+const clearAuthCookies = (res) => {
+  const cookieOptions = getCookieOptions();
+  return res
+    .clearCookie('accessToken', cookieOptions)
+    .clearCookie('refreshToken', cookieOptions);
+};
 
 // Validates and normalizes a { lat, lng } payload from the client.
 // Returns null if no usable coordinates were sent, so callers can safely
@@ -62,7 +87,7 @@ export async function register(req, res) {
 
     const user = await User.create({ name, email, password });
 
-    const emailCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const emailCode = generateEmailCode();
     user.emailToken = emailCode;
     user.emailTokenExpires = Date.now() + 15 * 60 * 1000;
     await user.save();
@@ -83,6 +108,7 @@ export async function register(req, res) {
       },
     });
   } catch (error) {
+    logError('register', error);
     res.status(500).json({ message: 'Server error during registration.' });
   }
 }
@@ -105,6 +131,7 @@ export async function verifyEmail(req, res) {
 
     res.json({ message: 'Email verified successfully!' });
   } catch (error) {
+    logError('verifyEmail', error);
     res.status(500).json({ message: 'Server error during email verification.' });
   }
 }
@@ -128,7 +155,7 @@ export async function login(req, res) {
     const accessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
     const refreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
 
-    user.refreshToken = refreshToken;
+    user.refreshToken = hashToken(refreshToken); // store the hash, never the raw token
     await user.save();
 
     const cookieOptions = getCookieOptions();
@@ -146,83 +173,126 @@ export async function login(req, res) {
         },
       });
   } catch (error) {
+    logError('login', error);
     res.status(500).json({ message: 'Server error during login.' });
   }
 }
 
 // ------------------------------
 // 🚪 Logout
+// Works even when the access token has expired: the user id comes from
+// the refresh cookie, so the stored refresh hash is always invalidated.
+// Route must NOT sit behind the `protect` middleware.
 // ------------------------------
 export async function logout(req, res) {
   try {
-    if (req.user?.id) {
-      await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
+    let userId = req.user?.id;
+
+    if (!userId && req.cookies?.refreshToken) {
+      try {
+        userId = jwt.verify(req.cookies.refreshToken, process.env.REFRESH_TOKEN_SECRET).id;
+      } catch (e) {
+        if (!isJwtError(e)) throw e; // expired/invalid cookie: nothing to invalidate
+      }
     }
 
-    const cookieOptions = getCookieOptions();
-    res
-      .clearCookie('accessToken', cookieOptions)
-      .clearCookie('refreshToken', cookieOptions)
-      .sendStatus(204);
+    if (userId) {
+      await User.findByIdAndUpdate(userId, { refreshToken: null });
+    }
+
+    clearAuthCookies(res).sendStatus(204);
   } catch (error) {
+    logError('logout', error);
     res.status(500).json({ message: 'Server error during logout.' });
   }
 }
 
 // ------------------------------
 // ♻️ Refresh Tokens
+// Guests / invalid sessions get 200 { user: null } (no console error).
+// Rotation is atomic: only one concurrent request can swap the old hash.
+// A hash mismatch does NOT clear cookies, so a losing tab in a race can't
+// wipe the cookies the winning tab just received.
+// Route must NOT sit behind the `protect` middleware.
 // ------------------------------
 export async function refresh(req, res) {
-  const token = req.cookies?.refreshToken;
+  res.set('Cache-Control', 'no-store');
 
-  if (!token) {
-    return res.sendStatus(401);
-  }
+  const token = req.cookies?.refreshToken;
+  if (!token) return res.json({ user: null });
 
   try {
     const payload = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
-    const user = await User.findById(payload.id);
+    const newRefreshToken = signRefreshToken({ id: payload.id, isAdmin: payload.isAdmin });
 
-    if (!user || user.refreshToken !== token) {
-      return res.sendStatus(403);
+    const user = await User.findOneAndUpdate(
+      { _id: payload.id, refreshToken: hashToken(token) },
+      { refreshToken: hashToken(newRefreshToken) },
+      { new: true }
+    ).select('isAdmin');
+
+    if (!user) {
+      // reused, already rotated by another request, or user deleted
+      return res.json({ user: null });
     }
 
     const newAccessToken = signAccessToken({ id: user._id, isAdmin: user.isAdmin });
-    const newRefreshToken = signRefreshToken({ id: user._id, isAdmin: user.isAdmin });
-
-    user.refreshToken = newRefreshToken;
-    await user.save();
 
     const cookieOptions = getCookieOptions();
     res
       .cookie('accessToken', newAccessToken, { ...cookieOptions, maxAge: ACCESS_TOKEN_MAX_AGE })
       .cookie('refreshToken', newRefreshToken, { ...cookieOptions, maxAge: REFRESH_TOKEN_MAX_AGE })
       .json({ message: 'Tokens refreshed successfully' });
-
-  } catch (err) {
-    res.sendStatus(403);
+  } catch (error) {
+    if (isJwtError(error)) {
+      return clearAuthCookies(res).json({ user: null });
+    }
+    logError('refresh', error);
+    res.status(500).json({ message: 'Server error during token refresh.' });
   }
 }
 
 // ------------------------------
 // 👥 Me
+// Self-contained: verifies the access cookie itself and returns
+// 200 { user: null } for guests or expired tokens.
+// Route must NOT sit behind the `protect` middleware.
 // ------------------------------
 export async function me(req, res) {
-  if (!req.user) return res.status(401).json({ message: 'Not authenticated' });
+  res.set('Cache-Control', 'no-store');
 
-  res.json({
-    user: {
-      id: req.user._id,
-      name: req.user.name,
-      email: req.user.email,
-      isAdmin: req.user.isAdmin,
-      isVerified: req.user.isVerified,
-    },
-  });
+  const token = req.cookies?.accessToken;
+  if (!token) return res.json({ user: null });
+
+  try {
+    // Confirm this env name matches what utils/jwt.js signs with
+    const payload = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    const user = await User.findById(payload.id)
+      .select('name email isAdmin isVerified')
+      .lean();
+
+    if (!user) return res.json({ user: null });
+
+    res.json({
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        isAdmin: user.isAdmin,
+        isVerified: user.isVerified,
+      },
+    });
+  } catch (error) {
+    if (isJwtError(error)) return res.json({ user: null }); // client will try /refresh
+    logError('me', error);
+    res.status(500).json({ message: 'Server error fetching session.' });
+  }
 }
 
 // ------------------------------
 // 🔄 Password Reset
+// The DB stores a hash of the reset token; the raw token only exists
+// in the emailed link.
 // ------------------------------
 export async function requestPasswordReset(req, res) {
   const { email } = req.body;
@@ -231,7 +301,7 @@ export async function requestPasswordReset(req, res) {
     if (!user) return res.sendStatus(204);
 
     const resetToken = randomToken();
-    user.resetToken = resetToken;
+    user.resetToken = hashToken(resetToken);
     user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
     await user.save();
 
@@ -244,6 +314,7 @@ export async function requestPasswordReset(req, res) {
 
     res.json({ message: 'Password reset link sent to your email.' });
   } catch (error) {
+    logError('requestPasswordReset', error);
     res.status(500).json({ message: 'Server error during password reset request.' });
   }
 }
@@ -253,7 +324,7 @@ export async function resetPassword(req, res) {
   try {
     const user = await User.findOne({
       _id: id,
-      resetToken: token,
+      resetToken: hashToken(token),
       resetTokenExpires: { $gt: Date.now() },
     }).select('+password');
 
@@ -262,10 +333,12 @@ export async function resetPassword(req, res) {
     user.password = password;
     user.resetToken = undefined;
     user.resetTokenExpires = undefined;
+    user.refreshToken = null; // password changed: end all existing sessions
     await user.save();
 
     res.json({ message: 'Password reset successful.' });
   } catch (error) {
+    logError('resetPassword', error);
     res.status(500).json({ message: 'Server error during password reset.' });
   }
 }
@@ -277,7 +350,8 @@ export const getProfile = async (req, res) => {
       return res.status(401).json({ message: 'Not authenticated or user data missing.' });
     }
     res.json(req.user);
-  } catch (err) {
+  } catch (error) {
+    logError('getProfile', error);
     res.status(500).json({ error: 'Server error fetching profile.' });
   }
 };
@@ -310,10 +384,11 @@ export const updateProfile = async (req, res) => {
     }
 
     res.json({ message: 'Profile updated successfully', user: updatedUser });
-  } catch (err) {
-    if (err.code === 11000) {
+  } catch (error) {
+    if (error.code === 11000) {
       return res.status(400).json({ message: 'Email already exists. Please use a different email.' });
     }
+    logError('updateProfile', error);
     res.status(500).json({ error: 'Server error updating profile.' });
   }
 };
@@ -324,6 +399,7 @@ export const getAllUsers = async (req, res) => {
     const users = await User.find({}).select('-password -refreshToken');
     res.status(200).json(users);
   } catch (error) {
+    logError('getAllUsers', error);
     res.status(500).json({ message: 'Server error fetching users.' });
   }
 };
@@ -340,6 +416,7 @@ export const getUserById = async (req, res) => {
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format.' });
     }
+    logError('getUserById', error);
     res.status(500).json({ message: 'Server error fetching user.' });
   }
 };
@@ -499,6 +576,7 @@ export const getAdminDashboardStats = async (req, res) => {
     });
 
   } catch (error) {
+    logError('getAdminDashboardStats', error);
     res.status(500).json({ message: 'Failed to fetch dashboard statistics.' });
   }
 };
@@ -565,6 +643,7 @@ export const updateUser = async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ message: 'A user with this email already exists.' });
     }
+    logError('updateUser', error);
     res.status(500).json({ message: 'Server error updating user.' });
   }
 };
@@ -591,6 +670,7 @@ export const deleteUser = async (req, res) => {
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format.' });
     }
+    logError('deleteUser', error);
     res.status(500).json({ message: 'Server error deleting user.' });
   }
-};
+};                                                                                                     
