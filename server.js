@@ -3,9 +3,10 @@ import dotenv     from 'dotenv';
 import cookieParser from 'cookie-parser';
 import cors       from 'cors';
 import http       from 'http';
+import mongoose   from 'mongoose';
 import connectDB  from './config/db.js';
 import * as security from './middlewares/security.js';
-import { handlePaystackWebhook } from './controllers/paystackWebhookController.js';                                                                                                  
+import { handlePaystackWebhook } from './controllers/paystackWebhookController.js';
 import photoAnalysisRoutes from './routes/photoanalysisroute.js';
 import authRoutes         from './routes/authRoutes.js';
 import measurementRoutes  from './routes/measurement.js';
@@ -16,6 +17,8 @@ import currencyRoutes     from './routes/currency.js';
 import orderRoutes        from './routes/order.js';
 import fabricRoutes       from './routes/fabricRoutes.js';
 import { initSocket }     from './services/socket.js';
+import { setIo }          from './utils/notifyUsers.js';                       // NEW
+import { rescheduleAllNotifications } from './utils/notificationScheduler.js'; // NEW
 
 dotenv.config();
 
@@ -104,9 +107,19 @@ app.use((err, req, res, next) => {
 // ── M. Database + Server ──────────────────────────────────────────────────────
 connectDB();
 
+// NEW: once Mongo is connected, re-create all scheduled notification jobs
+// (node-schedule jobs live in memory and are lost on every restart).
+// If connectDB() already calls this elsewhere, remove this block.
+if (mongoose.connection.readyState === 1) {
+  rescheduleAllNotifications();
+} else {
+  mongoose.connection.once('open', rescheduleAllNotifications);
+}
+
 const server = http.createServer(app);
 const io     = initSocket(server);
 app.set('io', io);
+setIo(io); // NEW: lets the scheduler emit real-time events
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {

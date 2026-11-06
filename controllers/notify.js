@@ -126,23 +126,17 @@ export const deleteNotification = async (req, res) => {
 // ── POST /api/notifications/subscribe ────────────────────────────────────────
 export const savePushSubscription = async (req, res) => {
   try {
-    console.log('📥 savePushSubscription called for user:', req.user?.id);
-
     if (!req.user?.id) {
       return res.status(401).json({ success: false, message: 'User not authenticated' });
     }
 
     const { subscription } = req.body;
 
-    console.log('📦 Received subscription object:', JSON.stringify(subscription, null, 2));
-
     if (!subscription?.endpoint) {
       console.error('❌ No endpoint in subscription object');
       return res.status(400).json({ success: false, message: 'Invalid subscription object — missing endpoint' });
     }
 
-    // Only add if this endpoint isn't already stored for this user
-    // This handles the same device re-subscribing without duplication
     const user = await User.findById(req.user.id).select('name pushSubscriptions');
 
     if (!user) {
@@ -150,16 +144,23 @@ export const savePushSubscription = async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
+    // A device (endpoint) belongs to ONE account. If someone else previously
+    // logged in on this phone/browser, remove the endpoint from their account
+    // so they stop receiving this user's notifications.
+    await User.updateMany(
+      { _id: { $ne: req.user.id }, 'pushSubscriptions.subscription.endpoint': subscription.endpoint },
+      { $pull: { pushSubscriptions: { 'subscription.endpoint': subscription.endpoint } } }
+    );
+
+    // Only add if this endpoint isn't already stored for this user
     const alreadyExists = user.pushSubscriptions?.some(
       entry => entry.subscription?.endpoint === subscription.endpoint
     );
 
     if (alreadyExists) {
-      console.log(`ℹ️ Subscription endpoint already saved for "${user.name}" — skipping duplicate`);
       return res.status(200).json({ success: true, message: 'Subscription already saved' });
     }
 
-    // Append the new subscription to the array
     await User.findByIdAndUpdate(
       req.user.id,
       {
@@ -170,13 +171,10 @@ export const savePushSubscription = async (req, res) => {
             createdAt: new Date()
           }
         }
-      },
-      { new: true }
+      }
     );
 
     console.log(`✅ Push subscription saved for user "${user.name}"`);
-    console.log('💾 Endpoint stored:', subscription.endpoint?.slice(0, 60) + '...');
-
     res.status(200).json({ success: true, message: 'Push subscription saved' });
   } catch (error) {
     console.error('❌ Error saving push subscription:', error);

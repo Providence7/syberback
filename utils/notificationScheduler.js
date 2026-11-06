@@ -1,10 +1,10 @@
 // src/utils/notificationScheduler.js
-import schedule    from 'node-schedule';
-import Order       from '../models/order.js';
-import Notification from '../models/notification.js';
-import User        from '../models/user.js';
-import { sendEmail } from './email.js';
-import dotenv from 'dotenv';
+import schedule       from 'node-schedule';
+import Order          from '../models/order.js';
+import User           from '../models/user.js';
+import { notifyUser } from './notifyUsers.js';
+import { sendEmail }  from './email.js';
+import dotenv         from 'dotenv';
 
 dotenv.config();
 
@@ -19,6 +19,14 @@ function registerJob(name, date, fn) {
   // Don't schedule jobs in the past — node-schedule will fire them immediately
   // on some versions, which causes unexpected bursts on server restart.
   if (date <= new Date()) return;
+
+  // If a job with this name already exists, cancel it first so the same
+  // notification can never fire twice.
+  const existing = scheduledJobs.get(name) || schedule.scheduledJobs[name];
+  if (existing) {
+    existing.cancel();
+    scheduledJobs.delete(name);
+  }
 
   const job = schedule.scheduleJob(name, date, fn);
   if (job) {
@@ -110,8 +118,8 @@ function interpolate(template, name, item, shortId) {
  * scheduleOrderNotifications
  *
  * Schedules all automated notifications for a single order.
- * Safe to call multiple times — existing jobs with the same name are
- * replaced by node-schedule, so there's no duplication on server restart.
+ * Safe to call multiple times — registerJob cancels any existing job with
+ * the same name before creating a new one.
  *
  * Call this:
  *   - After payment is verified (verifyOrderPayment controller)
@@ -136,8 +144,6 @@ export const scheduleOrderNotifications = async (order) => {
         d.setDate(d.getDate() + 7);
         return d;
       })();
-
-  // console.log(`Scheduling notifications for Order ${orderId}. Expected delivery: ${deliveryDate.toLocaleDateString()}`);
 
   // ── Fetch user once ────────────────────────────────────────────────────────
   const user = order.user ? await User.findById(order.user).lean() : null;
@@ -198,24 +204,23 @@ export const scheduleOrderNotifications = async (order) => {
     const jobName = `user_day${step.day}_${orderId}`;
 
     registerJob(jobName, stepDate, async () => {
-      // ── 1. In-app notification (DB) ──────────────────────────────────────
+      // ── 1. In-app + real-time + Web Push (all via notifyUser) ────────────
       try {
-        await Notification.create({
-          user:     user._id,
-          order:    order._id,
+        await notifyUser(null, user._id.toString(), {
           title:    step.title,
           message:  interpolate(step.message, name, item, shortId),
-          type:     step.type,      // 'order_progress' or 'delivery_imminent'
+          type:     step.type,        // 'order_progress' or 'delivery_imminent'
           category: 'order',
+          order:    order._id,
+          url:      '/app',           // change to your orders page if you have one
         });
-        console.log(`In-app notification sent (Day ${step.day}): "${step.title}" for Order ${orderId}`);
+        console.log(`Notification sent (Day ${step.day}): "${step.title}" for Order ${orderId}`);
       } catch (err) {
-        // Log clearly — this is the error that was flooding your logs
-        console.error(`In-app notification failed (Day ${step.day}) for Order ${orderId}:`, err.message);
+        console.error(`Notification failed (Day ${step.day}) for Order ${orderId}:`, err.message);
       }
 
       // ── 2. Email notification ────────────────────────────────────────────
-      // Runs independently — email failure does not affect the DB notification
+      // Runs independently — email failure does not affect the notification above
       try {
         await sendEmail({
           to:      email,
@@ -237,14 +242,14 @@ export const scheduleOrderNotifications = async (order) => {
  * Call this when an order is deleted or cancelled.
  */
 export const cancelOrderNotifications = (orderId) => {
-  const prefixes = [
+  const names = [
     `admin_3d_before_${orderId}`,
     `admin_1d_before_${orderId}`,
     ...PROGRESS_STEPS.map(s => `user_day${s.day}_${orderId}`),
   ];
 
   let cancelled = 0;
-  for (const name of prefixes) {
+  for (const name of names) {
     const job = scheduledJobs.get(name);
     if (job) {
       job.cancel();
@@ -272,8 +277,6 @@ export const cancelOrderNotifications = (orderId) => {
  */
 export const rescheduleAllNotifications = async () => {
   try {
-   
-
     const activeOrders = await Order.find({
       orderType:            'Online',
       paymentStatus:        'paid',
@@ -281,13 +284,11 @@ export const rescheduleAllNotifications = async () => {
       expectedDeliveryDate: { $gte: new Date() },
     }).lean();
 
-    // console.log(`Found ${activeOrders.length} active orders to reschedule.`);
-
     for (const order of activeOrders) {
       await scheduleOrderNotifications(order);
     }
 
-    console.log('Notification rescheduling complete.');
+    console.log(`Notification rescheduling complete (${activeOrders.length} active orders).`);
   } catch (err) {
     console.error('Notification rescheduling error on startup:', err.message);
   }

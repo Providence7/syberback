@@ -1,76 +1,69 @@
 // utils/webPush.js
+import 'dotenv/config'; // ES imports are hoisted, so load env vars before reading them
 import webpush from 'web-push';
 import User from '../models/user.js';
 
-// ── VAPID setup with validation ───────────────────────────────────────────────
+// ── VAPID setup ───────────────────────────────────────────────────────────────
 const { VAPID_EMAIL, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY } = process.env;
+const pushEnabled = !!(VAPID_EMAIL && VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 
-if (!VAPID_EMAIL || !VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-  console.error('❌ VAPID env vars missing:', {
+if (pushEnabled) {
+  const subject = /^(mailto:|https:)/.test(VAPID_EMAIL) ? VAPID_EMAIL : `mailto:${VAPID_EMAIL}`;
+  webpush.setVapidDetails(subject, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log('✅ VAPID keys loaded.');
+} else {
+  console.error('❌ VAPID env vars missing — web push is disabled:', {
     VAPID_EMAIL:       !!VAPID_EMAIL,
     VAPID_PUBLIC_KEY:  !!VAPID_PUBLIC_KEY,
     VAPID_PRIVATE_KEY: !!VAPID_PRIVATE_KEY,
   });
-} else {
-  console.log('✅ VAPID keys loaded. Email:', VAPID_EMAIL);
 }
 
-webpush.setVapidDetails(
-  VAPID_EMAIL,
-  VAPID_PUBLIC_KEY,
-  VAPID_PRIVATE_KEY,
-);
-
-// ── Send push to a raw subscription object ────────────────────────────────────
-export const sendPushToUser = async (subscription, payload) => {
-  if (!subscription?.endpoint) {
-    console.warn('⚠️ sendPushToUser: no endpoint on subscription, skipping');
-    return;
-  }
-
-  console.log('📤 Attempting web push to:', subscription.endpoint.slice(0, 70) + '...');
-
-  try {
-    const result = await webpush.sendNotification(
-      subscription,
-      JSON.stringify({
-        title:   payload.title   || 'AttireByte',
-        message: payload.message || '',
-        type:    payload.type    || 'info',
-      })
-    );
-    console.log('✅ Web push sent! Status:', result.statusCode);
-  } catch (err) {
-    console.error('❌ Web push FAILED. Status:', err.statusCode, '| Body:', err.body || err.message);
-    if (err.statusCode === 410 || err.statusCode === 404) {
-      return 'expired';
-    }
-  }
-};
-
-// ── Look up user's saved subscription then send ───────────────────────────────
+// ── Send a push to every device the user has allowed ─────────────────────────
 export const pushNotifyUser = async (userId, payload) => {
+  if (!pushEnabled) return;
+
   try {
-    console.log('🔍 pushNotifyUser: checking subscription for user', userId.toString());
+    // NOTE: field is `pushSubscriptions` (array) — matches savePushSubscription
+    const user = await User.findById(userId).select('pushSubscriptions').lean();
+    const entries = user?.pushSubscriptions || [];
 
-    const user = await User.findById(userId).select('pushSubscription name');
+    if (!entries.length) return; // user hasn't allowed notifications on any device
 
-    if (!user) {
-      console.warn('⚠️ pushNotifyUser: user not found:', userId);
-      return;
-    }
+    const body = JSON.stringify({
+      id:       payload.id,
+      title:    payload.title   || 'AttireByte',
+      message:  payload.message || '',
+      type:     payload.type    || 'info',
+      category: payload.category,
+      url:      payload.url     || '/app',
+    });
 
-    if (!user.pushSubscription) {
-      console.warn(`⚠️ pushNotifyUser: "${user.name}" has NO push subscription — they haven't allowed notifications yet`);
-      return;
-    }
+    const results = await Promise.allSettled(
+      entries.map(e =>
+        webpush.sendNotification(e.subscription, body, { TTL: 86400, urgency: 'high' })
+      )
+    );
 
-    console.log(`📬 Sending push to "${user.name}"...`);
-    const result = await sendPushToUser(user.pushSubscription, payload);
+    // Collect dead subscriptions so we can clean them up
+    const expiredEndpoints = [];
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        const code = r.reason?.statusCode;
+        if (code === 404 || code === 410) {
+          expiredEndpoints.push(entries[i].subscription.endpoint);
+        } else {
+          console.error('❌ Web push failed. Status:', code, '|', r.reason?.body || r.reason?.message);
+        }
+      }
+    });
 
-    if (result === 'expired') {
-      console.log(`🗑️ Removing stale subscription for "${user.name}"`);
-      await User.findByIdAndUpdate(userId, { $unset: { pushSubscription: '' } });
+    if (expiredEndpoints.length) {
+      await User.updateOne(
+        { _id: userId },
+        { $pull: { pushSubscriptions: { 'subscription.endpoint': { $in: expiredEndpoints } } } }
+      );
+      console.log(`🗑️ Removed ${expiredEndpoints.length} expired subscription(s) for user ${userId}`);
     }
   } catch (err) {
     console.error('❌ pushNotifyUser error:', err.message);
