@@ -3,15 +3,8 @@ import OpenAI from 'openai';
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
 import { determineSize, SIZE_MAP } from '../utils/sizeGuide.js';
-import { notifyUser } from '../utils/notifyUsers.js';
-import { sendPushToUsers } from '../utils/pushNotify.js';
-import { sendEmail } from '../utils/email.js';
-
+import { notifyAdminsPhotoOnly } from '../utils/pushNotify.js';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// Where tapping the phone notification should land. Change this to the route
-// of your admin measurements page.
-const ADMIN_MEASUREMENTS_PATH = '/app/admin/measurements';
 
 const parseAge = (value) => {
   if (value === undefined || value === null || value === '') return null;
@@ -133,60 +126,6 @@ const checkPhotoAdvisory = async (photoUrl) => {
     console.error('[photo check] unavailable — saving photo unchecked:', err.message);
     return { photoCheck: 'unchecked', photoValidated: false, photoCheckNotes: '' };
   }
-};
-
-// ── Admin alert: customer saved a photo but no measurements ───────────────
-// Three channels, each independent — one failing never blocks the others:
-//   1. saved notification + live Socket.io pop-up (admin logged in on any screen)
-//   2. Web Push (phone notification bar, even when the app is closed)
-//   3. email to ADMIN_EMAIL
-const notifyAdminsPhotoOnly = async (req, measurement) => {
-  const admins = await User.find({ isAdmin: true }).select('_id');
-  if (admins.length === 0) return;
-
-  const adminIds = admins.map((a) => a._id);
-  const who      = measurement.user?.name || 'A customer';
-  const title    = '📸 Photo-only profile — needs measuring';
-  const message  = `${who} saved "${measurement.name}" with a photo but no measurements. Please take their measurements.`;
-  const io       = req.app.get('io');
-  const link     = `${process.env.CLIENT_URL || ''}${ADMIN_MEASUREMENTS_PATH}`;
-
-  const results = await Promise.allSettled([
-    Promise.all(
-      adminIds.map((id) =>
-        notifyUser(io, id.toString(), { title, message, type: 'warning', category: 'measurement' }),
-      ),
-    ),
-    sendPushToUsers(adminIds, {
-      title,
-      body: message,
-      url: ADMIN_MEASUREMENTS_PATH,
-      tag: `photo-only-${measurement._id}`,
-    }),
-    process.env.ADMIN_EMAIL
-      ? sendEmail({
-          to: process.env.ADMIN_EMAIL,
-          subject: `Photo-only measurement profile: ${who}`,
-          html: `
-            <h2>Photo-only measurement profile</h2>
-            <p><strong>${who}</strong> (${measurement.user?.email || 'no email'}) saved the profile
-               <strong>"${measurement.name}"</strong> with a photo but <strong>no measurements</strong>.</p>
-            <p>Please take their measurements on your end.</p>
-            ${measurement.photoCheck === 'failed'
-              ? `<p>⚠️ The automatic photo check had doubts: ${measurement.photoCheckNotes}</p>`
-              : ''}
-            ${measurement.photoUrl ? `<p><a href="${measurement.photoUrl}">View photo</a></p>` : ''}
-            <p><a href="${link}">Open admin measurements</a></p>
-          `,
-        })
-      : Promise.resolve(),
-  ]);
-
-  results.forEach((r, i) => {
-    if (r.status === 'rejected') {
-      console.error(`[photo-only alert] channel ${i} failed:`, r.reason?.message || r.reason);
-    }
-  });
 };
 
 // ── POST /api/measurements ────────────────────────────────────────────────────

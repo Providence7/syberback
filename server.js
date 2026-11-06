@@ -17,8 +17,9 @@ import currencyRoutes     from './routes/currency.js';
 import orderRoutes        from './routes/order.js';
 import fabricRoutes       from './routes/fabricRoutes.js';
 import { initSocket }     from './services/socket.js';
-import { setIo }          from './utils/notifyUsers.js';                       // NEW
-import { rescheduleAllNotifications } from './utils/notificationScheduler.js'; // NEW
+import { initPush }       from './utils/pushNotify.js';
+import { setIo }          from './utils/notifyUsers.js';
+import { rescheduleAllNotifications } from './utils/notificationScheduler.js';
 
 dotenv.config();
 
@@ -82,12 +83,14 @@ const protectedPrefixes = [
   '/api/measurements',
   '/api/order',
   '/api/orders',
+  '/api/push',
 ];
 app.use(protectedPrefixes, security.strictOriginCheck);
 
 app.use('/api/measurements', measurementRoutes);
 app.use('/api/order',        inpersonRoute);
 app.use('/api/orders',       orderRoutes);
+initPush(app); // mounts /api/push/* (public-key, subscribe, unsubscribe, test)
 
 // ── K. Public routes ──────────────────────────────────────────────────────────
 app.use('/api/notifications', notificationRoutes);
@@ -107,9 +110,8 @@ app.use((err, req, res, next) => {
 // ── M. Database + Server ──────────────────────────────────────────────────────
 connectDB();
 
-// NEW: once Mongo is connected, re-create all scheduled notification jobs
+// Once Mongo is connected, re-create all scheduled notification jobs
 // (node-schedule jobs live in memory and are lost on every restart).
-// If connectDB() already calls this elsewhere, remove this block.
 if (mongoose.connection.readyState === 1) {
   rescheduleAllNotifications();
 } else {
@@ -119,7 +121,7 @@ if (mongoose.connection.readyState === 1) {
 const server = http.createServer(app);
 const io     = initSocket(server);
 app.set('io', io);
-setIo(io); // NEW: lets the scheduler emit real-time events
+setIo(io);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
