@@ -10,16 +10,28 @@ const measurementSchema = new mongoose.Schema(
     photoUrl:       { type: String, default: null },
     photoPublicId:  { type: String, default: null },
 
-    // Was this photo validated by AI as a clear full-body image?
+    // true only when the server-side AI check confirmed a clear full-body photo.
+    // This no longer decides whether the photo is kept — see photoCheck below.
     photoValidated: { type: Boolean, default: false },
+
+    // Advisory result of the server-side AI photo check. It NEVER blocks a save:
+    //   'passed'    – AI confirmed one person, standing, head to toe
+    //   'failed'    – AI had doubts (see photoCheckNotes) — admin should eyeball it
+    //   'unchecked' – the checker was unavailable; photo saved as-is
+    photoCheck:      { type: String, enum: ['passed', 'failed', 'unchecked'], default: 'unchecked' },
+    photoCheckNotes: { type: String, default: '' },
+
+    // true when the profile has a photo but NO measurement values — the admin /
+    // tailor takes the measurements on their end. Cleared automatically once
+    // measurement values are saved (by the customer or by the admin).
+    photoOnly: { type: Boolean, default: false },
 
     unit:   { type: String, enum: ['in'], default: 'in' },
     gender: { type: String, enum: ['male', 'female'], lowercase: true },
 
     // Single machine-readable size key — used by the order form to look up
-    // materialQuantities. We intentionally collapsed top/bottom sizing into
-    // one final size (the larger of the two) so clients aren't shown two
-    // different sizes on the same profile.
+    // materialQuantities. NOTE: for photoOnly profiles this is just the default
+    // placeholder ('medium') until real measurements are entered.
     size: {
       type: String,
       enum: SIZE_VALUES,
@@ -31,8 +43,7 @@ const measurementSchema = new mongoose.Schema(
       default: 'Medium',
     },
 
-    // Optional age in years. Kept nullable (not required) since a profile can
-    // be created from measurements alone with no age given.
+    // Optional age in years.
     age: {
       type: Number,
       min: [0, 'Age cannot be negative'],
@@ -52,9 +63,10 @@ const measurementSchema = new mongoose.Schema(
   },
 );
 
-// Virtual: does this measurement profile have a validated photo?
+// Virtual: does this profile have a photo? (Any saved photo counts — it no
+// longer has to pass the AI check to be kept.)
 measurementSchema.virtual('hasPhoto').get(function () {
-  return !!this.photoUrl && this.photoValidated === true;
+  return !!this.photoUrl;
 });
 
 // Virtual: does this profile have at least some measurement data?

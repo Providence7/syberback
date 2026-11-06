@@ -3,14 +3,36 @@ import OpenAI from 'openai';
 import Measurement from '../models/measurement.js';
 import User from '../models/user.js';
 import { determineSize, SIZE_MAP } from '../utils/sizeGuide.js';
+import { notifyUser } from '../utils/notifyUsers.js';
+import { sendPushToUsers } from '../utils/pushNotify.js';
+import { sendEmail } from '../utils/email.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Where tapping the phone notification should land. Change this to the route
+// of your admin measurements page.
+const ADMIN_MEASUREMENTS_PATH = '/app/admin/measurements';
 
 const parseAge = (value) => {
   if (value === undefined || value === null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
+
+const parseData = (raw) => {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+// True if at least one real measurement value was entered.
+const hasMeasurementValues = (data) =>
+  !!data &&
+  typeof data === 'object' &&
+  Object.values(data).some((v) => v !== '' && v !== null && v !== undefined);
 
 // Server-side single source of truth for garment size. Never trust
 // client-computed size fields — always recompute from the measurement
@@ -23,11 +45,11 @@ const computeSize = (data, age) => {
   };
 };
 
-// ── Photo validation (GPT-4o vision) ──────────────────────────────────────
-// Checks only what we need to accept a tailoring photo: exactly one person,
-// standing upright, visible head to toe. No measurement generation.
-// imageUrl must be a publicly reachable URL (e.g. the Cloudinary secure_url
-// multer-storage-cloudinary already gave us) — no base64/buffer needed.
+// ── Photo check (GPT-4o vision) — ADVISORY ONLY ───────────────────────────
+// The browser already blocks bad photos (MoveNet). This server check is a
+// second opinion that LABELS the photo for the admin — it never rejects or
+// deletes one. If OpenAI is down, mis-configured or disagrees, the photo is
+// still saved.
 
 const PHOTO_CHECK_SCHEMA = {
   type: 'json_schema',
@@ -63,16 +85,13 @@ const PHOTO_CHECK_SCHEMA = {
 
 const describePhotoIssues = (check) => {
   if (check.issues?.length) return check.issues.join(' ');
-  if (check.personCount === 0) return 'No person was detected in this photo — please upload a clear photo of yourself.';
-  if (check.personCount > 1) return 'This photo has more than one person in it — please upload a solo photo.';
-  if (!check.isUpright) return 'The person in this photo should be standing upright, not lying down or sideways.';
-  if (!check.isFullBody) return 'Please upload a full-body photo showing the person from head to toe.';
-  return 'This photo could not be used — please try a different one.';
+  if (check.personCount === 0) return 'No person was detected in this photo.';
+  if (check.personCount > 1) return 'This photo has more than one person in it.';
+  if (!check.isUpright) return 'The person in this photo does not appear to be standing upright.';
+  if (!check.isFullBody) return 'The photo does not show the person from head to toe.';
+  return 'This photo could not be verified.';
 };
 
-// Returns { valid, personCount, isUpright, isFullBody, issues } on success,
-// or throws — callers decide how to surface a check-failed error vs an
-// invalid-photo error.
 const validatePersonPhoto = async (imageUrl) => {
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o-2024-08-06',
@@ -100,30 +119,97 @@ const validatePersonPhoto = async (imageUrl) => {
   return { valid, ...parsed };
 };
 
+// Never throws, never blocks. Returns the fields to store on the measurement.
+const checkPhotoAdvisory = async (photoUrl) => {
+  try {
+    const check = await validatePersonPhoto(photoUrl);
+    return {
+      photoCheck:      check.valid ? 'passed' : 'failed',
+      photoValidated:  check.valid,
+      photoCheckNotes: check.valid ? '' : describePhotoIssues(check),
+    };
+  } catch (err) {
+    // This line tells you WHY the AI check isn't working (bad key, quota, etc.)
+    console.error('[photo check] unavailable — saving photo unchecked:', err.message);
+    return { photoCheck: 'unchecked', photoValidated: false, photoCheckNotes: '' };
+  }
+};
+
+// ── Admin alert: customer saved a photo but no measurements ───────────────
+// Three channels, each independent — one failing never blocks the others:
+//   1. saved notification + live Socket.io pop-up (admin logged in on any screen)
+//   2. Web Push (phone notification bar, even when the app is closed)
+//   3. email to ADMIN_EMAIL
+const notifyAdminsPhotoOnly = async (req, measurement) => {
+  const admins = await User.find({ isAdmin: true }).select('_id');
+  if (admins.length === 0) return;
+
+  const adminIds = admins.map((a) => a._id);
+  const who      = measurement.user?.name || 'A customer';
+  const title    = '📸 Photo-only profile — needs measuring';
+  const message  = `${who} saved "${measurement.name}" with a photo but no measurements. Please take their measurements.`;
+  const io       = req.app.get('io');
+  const link     = `${process.env.CLIENT_URL || ''}${ADMIN_MEASUREMENTS_PATH}`;
+
+  const results = await Promise.allSettled([
+    Promise.all(
+      adminIds.map((id) =>
+        notifyUser(io, id.toString(), { title, message, type: 'warning', category: 'measurement' }),
+      ),
+    ),
+    sendPushToUsers(adminIds, {
+      title,
+      body: message,
+      url: ADMIN_MEASUREMENTS_PATH,
+      tag: `photo-only-${measurement._id}`,
+    }),
+    process.env.ADMIN_EMAIL
+      ? sendEmail({
+          to: process.env.ADMIN_EMAIL,
+          subject: `Photo-only measurement profile: ${who}`,
+          html: `
+            <h2>Photo-only measurement profile</h2>
+            <p><strong>${who}</strong> (${measurement.user?.email || 'no email'}) saved the profile
+               <strong>"${measurement.name}"</strong> with a photo but <strong>no measurements</strong>.</p>
+            <p>Please take their measurements on your end.</p>
+            ${measurement.photoCheck === 'failed'
+              ? `<p>⚠️ The automatic photo check had doubts: ${measurement.photoCheckNotes}</p>`
+              : ''}
+            ${measurement.photoUrl ? `<p><a href="${measurement.photoUrl}">View photo</a></p>` : ''}
+            <p><a href="${link}">Open admin measurements</a></p>
+          `,
+        })
+      : Promise.resolve(),
+  ]);
+
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`[photo-only alert] channel ${i} failed:`, r.reason?.message || r.reason);
+    }
+  });
+};
+
 // ── POST /api/measurements ────────────────────────────────────────────────────
 export const createMeasurement = async (req, res) => {
   try {
-    const photoUrl       = req.file?.path     || null;
-    const photoPublicId  = req.file?.filename || null;
-    let photoValidated = false;
-
-    if (req.file) {
-      try {
-        const check = await validatePersonPhoto(photoUrl);
-        if (!check.valid) {
-          // TODO: await cloudinary.uploader.destroy(photoPublicId); — remove the rejected upload
-          return res.status(400).json({ message: describePhotoIssues(check) });
-        }
-        photoValidated = true;
-      } catch (checkErr) {
-        console.error('Photo validation failed:', checkErr);
-        // TODO: await cloudinary.uploader.destroy(photoPublicId); — don't leave an unchecked photo attached
-        return res.status(502).json({ message: 'Could not verify this photo right now — please try again.' });
-      }
-    }
+    const photoUrl      = req.file?.path     || null;
+    const photoPublicId = req.file?.filename || null;
 
     const age  = parseAge(req.body.age);
-    const data = JSON.parse(req.body.data || '{}');
+    const data = parseData(req.body.data);
+
+    const hasValues = hasMeasurementValues(data);
+    if (!photoUrl && !hasValues) {
+      return res.status(400).json({
+        message: 'Add a full-body photo or fill in at least one measurement.',
+      });
+    }
+
+    const photoOnly = !!photoUrl && !hasValues;
+    const photoMeta = photoUrl
+      ? await checkPhotoAdvisory(photoUrl)
+      : { photoCheck: 'unchecked', photoValidated: false, photoCheckNotes: '' };
+
     const size = computeSize(data, age);
 
     const measurement = await Measurement.create({
@@ -135,11 +221,20 @@ export const createMeasurement = async (req, res) => {
       ...size,
       photoUrl,
       photoPublicId,
-      photoValidated,
+      ...photoMeta,
+      photoOnly,
       user:   req.user.id,
     });
 
     const populated = await Measurement.findById(measurement._id).populate('user', 'name email');
+
+    // Fire-and-forget: the customer's save must never wait on (or fail because of) alerts.
+    if (photoOnly) {
+      notifyAdminsPhotoOnly(req, populated).catch((e) =>
+        console.error('[photo-only alert] failed:', e.message),
+      );
+    }
+
     res.status(201).json(populated);
   } catch (err) {
     console.error('createMeasurement error:', err);
@@ -180,35 +275,30 @@ export const getMeasurementById = async (req, res) => {
 // ── PUT /api/measurements/:id ─────────────────────────────────────────────────
 export const updateMeasurement = async (req, res) => {
   try {
+    const existing = await Measurement.findOne({ _id: req.params.id, user: req.user.id })
+      .select('photoUrl photoPublicId');
+    if (!existing) return res.status(404).json({ error: 'Measurement not found' });
+
     let photoUpdate = {};
 
     if (req.file) {
-      try {
-        const check = await validatePersonPhoto(req.file.path);
-        if (!check.valid) {
-          // TODO: await cloudinary.uploader.destroy(req.file.filename); — remove the rejected upload
-          return res.status(400).json({ message: describePhotoIssues(check) });
-        }
-      } catch (checkErr) {
-        console.error('Photo validation failed:', checkErr);
-        // TODO: await cloudinary.uploader.destroy(req.file.filename);
-        return res.status(502).json({ message: 'Could not verify this photo right now — please try again.' });
-      }
-
-      const old = await Measurement.findOne({ _id: req.params.id, user: req.user.id }).select('photoPublicId');
-      if (old?.photoPublicId) {
-        // TODO: await cloudinary.uploader.destroy(old.photoPublicId);
+      const photoMeta = await checkPhotoAdvisory(req.file.path);
+      if (existing.photoPublicId) {
+        // TODO: await cloudinary.uploader.destroy(existing.photoPublicId);
       }
       photoUpdate = {
-        photoUrl:       req.file.path,
-        photoPublicId:  req.file.filename,
-        photoValidated: true,
+        photoUrl:      req.file.path,
+        photoPublicId: req.file.filename,
+        ...photoMeta,
       };
     }
 
     const age  = parseAge(req.body.age);
-    const data = JSON.parse(req.body.data || '{}');
+    const data = parseData(req.body.data);
     const size = computeSize(data, age);
+
+    const finalPhotoUrl = photoUpdate.photoUrl || existing.photoUrl;
+    const photoOnly     = !!finalPhotoUrl && !hasMeasurementValues(data);
 
     const update = {
       name:   req.body.name,
@@ -218,6 +308,7 @@ export const updateMeasurement = async (req, res) => {
       data,
       ...size,
       ...photoUpdate,
+      photoOnly,
     };
 
     const measurement = await Measurement.findOneAndUpdate(
@@ -227,6 +318,14 @@ export const updateMeasurement = async (req, res) => {
     ).populate('user', 'name email');
 
     if (!measurement) return res.status(404).json({ error: 'Measurement not found' });
+
+    // A new photo was added to a profile that still has no measurements → alert the admin.
+    if (req.file && photoOnly) {
+      notifyAdminsPhotoOnly(req, measurement).catch((e) =>
+        console.error('[photo-only alert] failed:', e.message),
+      );
+    }
+
     res.json(measurement);
   } catch (err) {
     console.error('updateMeasurement error:', err);
@@ -256,7 +355,7 @@ export const deleteMeasurement = async (req, res) => {
 export const checkUserMeasurements = async (req, res) => {
   try {
     const measurement = await Measurement.findOne({ user: req.user.id });
-    const hasPhoto    = !!(measurement?.photoUrl && measurement?.photoValidated);
+    const hasPhoto    = !!measurement?.photoUrl;
     return res.status(200).json({ hasMeasurement: !!measurement, hasPhoto });
   } catch (err) {
     console.error('checkUserMeasurements error:', err);
@@ -265,13 +364,15 @@ export const checkUserMeasurements = async (req, res) => {
 };
 
 // ── GET /api/measurements/admin ───────────────────────────────────────────────
+// Extra filter: ?photoOnly=true → only profiles waiting to be measured.
 export const getAdminMeasurements = async (req, res) => {
   try {
-    const { page = 1, limit = 10, searchTerm, gender, unit } = req.query;
+    const { page = 1, limit = 10, searchTerm, gender, unit, photoOnly } = req.query;
 
     let query = {};
     if (gender && gender !== 'All') query.gender = gender;
     if (unit   && unit   !== 'All') query.unit   = unit;
+    if (photoOnly === 'true')       query.photoOnly = true;
 
     if (searchTerm) {
       const matchingUsers = await User.find({
@@ -336,40 +437,37 @@ export const getAdminMeasurementById = async (req, res) => {
 };
 
 // ── PUT /api/measurements/admin/:id ──────────────────────────────────────────
+// This is where YOU enter the measurements for a photo-only profile. As soon
+// as real values are saved, photoOnly flips to false and the size is
+// recomputed from them.
 export const updateMeasurementAdmin = async (req, res) => {
   try {
+    const existing = await Measurement.findById(req.params.id).select('photoUrl photoPublicId');
+    if (!existing) return res.status(404).json({ message: 'Measurement not found.' });
+
     let photoUpdate = {};
 
     if (req.file) {
-      try {
-        const check = await validatePersonPhoto(req.file.path);
-        if (!check.valid) {
-          // TODO: await cloudinary.uploader.destroy(req.file.filename);
-          return res.status(400).json({ message: describePhotoIssues(check) });
-        }
-      } catch (checkErr) {
-        console.error('Photo validation failed:', checkErr);
-        // TODO: await cloudinary.uploader.destroy(req.file.filename);
-        return res.status(502).json({ message: 'Could not verify this photo right now — please try again.' });
-      }
-
-      const old = await Measurement.findById(req.params.id).select('photoPublicId');
-      if (old?.photoPublicId) {
-        // TODO: await cloudinary.uploader.destroy(old.photoPublicId);
+      const photoMeta = await checkPhotoAdvisory(req.file.path);
+      if (existing.photoPublicId) {
+        // TODO: await cloudinary.uploader.destroy(existing.photoPublicId);
       }
       photoUpdate = {
-        photoUrl:       req.file.path,
-        photoPublicId:  req.file.filename,
-        photoValidated: true,
+        photoUrl:      req.file.path,
+        photoPublicId: req.file.filename,
+        ...photoMeta,
       };
     }
 
     const { name, unit, gender, data: rawData, age: rawAge } = req.body;
     const age  = parseAge(rawAge);
-    const data = JSON.parse(rawData || '{}');
+    const data = parseData(rawData);
     const size = computeSize(data, age);
 
-    const update = { name, unit, gender, age, data, ...size, ...photoUpdate };
+    const finalPhotoUrl = photoUpdate.photoUrl || existing.photoUrl;
+    const photoOnly     = !!finalPhotoUrl && !hasMeasurementValues(data);
+
+    const update = { name, unit, gender, age, data, ...size, ...photoUpdate, photoOnly };
 
     const measurement = await Measurement.findByIdAndUpdate(req.params.id, update, {
       new: true, runValidators: true,
