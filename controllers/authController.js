@@ -37,10 +37,24 @@ const isJwtError = (e) =>
   e?.name === 'TokenExpiredError' ||
   e?.name === 'NotBeforeError';
 
+// CLIENT_URL may be a comma-separated list (see server.js CORS).
+// Links sent to users always use the first entry, no trailing slash.
+const CLIENT_URL = (process.env.CLIENT_URL || '')
+  .split(',')[0]
+  .trim()
+  .replace(/\/+$/, '');
+
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Override with COOKIE_SAMESITE=lax once the frontend proxies /api (same-origin).
+// Default: 'none' in production (cross-site), 'lax' locally.
+const SAME_SITE = (process.env.COOKIE_SAMESITE || (IS_PROD ? 'none' : 'lax')).toLowerCase();
+
 const getCookieOptions = () => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax',
+  // SameSite=None requires Secure; browsers reject it otherwise.
+  secure: IS_PROD || SAME_SITE === 'none',
+  sameSite: SAME_SITE,
   path: '/',
 });
 
@@ -305,7 +319,7 @@ export async function requestPasswordReset(req, res) {
     user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
     await user.save();
 
-    const resetURL = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}&id=${user._id}`;
+    const resetURL = `${CLIENT_URL}/reset-password?token=${resetToken}&id=${user._id}`;
     await sendEmail({
       to: email,
       subject: 'Reset your SyberTailor password',
@@ -673,4 +687,4 @@ export const deleteUser = async (req, res) => {
     logError('deleteUser', error);
     res.status(500).json({ message: 'Server error deleting user.' });
   }
-};                                                                                                     
+};
